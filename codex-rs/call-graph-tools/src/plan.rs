@@ -101,7 +101,15 @@ pub fn run_plan(req: &PlanRequest) -> Result<PlanResponse, PlanError> {
 
     let max_depth = req.max_path_depth.unwrap_or(6);
     let max_size = req.max_subgraph_size.unwrap_or(50);
-    let loaded = LoadedGraph::from_pgs_bounded(&store, &seed_node_ids, max_depth, max_size)?;
+    let cache = codex_call_graph_algo::default_caller_index_cache();
+    let index = cache.get_or_build(&pgs_path, &store)?;
+    let loaded = LoadedGraph::from_pgs_bounded_with_index(
+        &store,
+        &seed_node_ids,
+        max_depth,
+        max_size,
+        &index,
+    )?;
     let covered: HashSet<NodeId> = steiner_subgraph(&loaded, &seed_node_ids, max_depth, max_size);
 
     let mut subgraph_points: Vec<SymbolPoint> = Vec::with_capacity(covered.len());

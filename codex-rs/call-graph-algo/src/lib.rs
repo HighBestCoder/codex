@@ -1,4 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use codex_call_graph_store::{CallEdge, FnNode, GraphStore, NodeId, CallGraphStoreError, ResolvedTarget};
 use petgraph::algo::{kosaraju_scc, toposort};
@@ -100,6 +103,20 @@ impl LoadedGraph {
         max_nodes: usize,
     ) -> Result<Self, GraphAlgoError> {
         let callers_by_callee = build_simple_name_caller_index(pgs)?;
+        Self::from_pgs_bounded_with_index(pgs, seeds, max_radius, max_nodes, &callers_by_callee)
+    }
+
+    /// Same as `from_pgs_bounded` but reuses a caller of choice's
+    /// `callers_by_callee` map. Combine with `CallerIndexCache::get_or_build`
+    /// to amortize the O(E) index build over many plan/trace invocations
+    /// against the same PGS.
+    pub fn from_pgs_bounded_with_index(
+        pgs: &GraphStore,
+        seeds: &[NodeId],
+        max_radius: usize,
+        max_nodes: usize,
+        callers_by_callee: &HashMap<NodeId, Vec<NodeId>>,
+    ) -> Result<Self, GraphAlgoError> {
 
         let mut collected: HashSet<NodeId> = HashSet::new();
         let mut frontier: Vec<NodeId> = Vec::new();
@@ -145,7 +162,7 @@ impl LoadedGraph {
             frontier = next_frontier;
         }
 
-        Self::build_from_node_set(pgs, &collected, &callers_by_callee)
+        Self::build_from_node_set(pgs, &collected, callers_by_callee)
     }
 
     fn build_from_node_set(
@@ -205,6 +222,69 @@ fn callee_node_id_for_edge(
             Ok(hits.into_iter().map(|n| n.id).collect())
         }
     }
+}
+
+struct CachedIndex {
+    index: Arc<HashMap<NodeId, Vec<NodeId>>>,
+    built_at: Instant,
+}
+
+#[derive(Default)]
+pub struct CallerIndexCache {
+    entries: Mutex<HashMap<PathBuf, CachedIndex>>,
+    ttl: Duration,
+}
+
+impl CallerIndexCache {
+    pub fn new(ttl: Duration) -> Self {
+        Self {
+            entries: Mutex::new(HashMap::new()),
+            ttl,
+        }
+    }
+
+    /// Returns the inverse caller index for this PGS. Builds it once per
+    /// distinct `pgs_path` and reuses the result for `ttl` after that;
+    /// rebuilds after expiry. Cost dominates `from_pgs_bounded` on large
+    /// projects (O(E) scan of every out-edge plus a `nodes_by_name` lookup
+    /// for every simple-name edge), so amortizing across calls turns
+    /// graph_plan and graph_trace from "seconds per call" into
+    /// "milliseconds after the first".
+    pub fn get_or_build(
+        &self,
+        pgs_path: &std::path::Path,
+        pgs: &GraphStore,
+    ) -> Result<Arc<HashMap<NodeId, Vec<NodeId>>>, GraphAlgoError> {
+        let key = pgs_path.to_path_buf();
+        {
+            let guard = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(entry) = guard.get(&key) {
+                if entry.built_at.elapsed() < self.ttl {
+                    return Ok(Arc::clone(&entry.index));
+                }
+            }
+        }
+        let index = Arc::new(build_simple_name_caller_index(pgs)?);
+        let mut guard = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        guard.insert(
+            key,
+            CachedIndex {
+                index: Arc::clone(&index),
+                built_at: Instant::now(),
+            },
+        );
+        Ok(index)
+    }
+
+    pub fn invalidate(&self, pgs_path: &std::path::Path) {
+        let mut guard = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        guard.remove(pgs_path);
+    }
+}
+
+pub fn default_caller_index_cache() -> &'static CallerIndexCache {
+    static CACHE: std::sync::OnceLock<CallerIndexCache> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| CallerIndexCache::new(Duration::from_secs(300)))
 }
 
 pub fn scc_components(g: &LoadedGraph) -> Vec<Vec<NodeId>> {
@@ -581,6 +661,44 @@ mod tests {
         assert!(
             g.lookup(a).is_some(),
             "a calls b via simple-name; bounded BFS must walk the inverse index"
+        );
+    }
+
+    #[test]
+    fn caller_index_cache_returns_same_arc_for_repeated_lookups_within_ttl() {
+        let (dir, store) = build_chain_pgs();
+        let cache = CallerIndexCache::new(Duration::from_secs(60));
+        let first = cache.get_or_build(dir.path(), &store).expect("first build");
+        let second = cache.get_or_build(dir.path(), &store).expect("cached");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "second lookup within TTL must reuse the same Arc, not rebuild"
+        );
+    }
+
+    #[test]
+    fn caller_index_cache_distinguishes_paths() {
+        let (dir_a, store_a) = build_chain_pgs();
+        let (dir_b, store_b) = build_chain_pgs();
+        let cache = CallerIndexCache::new(Duration::from_secs(60));
+        let a = cache.get_or_build(dir_a.path(), &store_a).expect("a");
+        let b = cache.get_or_build(dir_b.path(), &store_b).expect("b");
+        assert!(
+            !Arc::ptr_eq(&a, &b),
+            "different pgs paths must own independent index Arcs"
+        );
+    }
+
+    #[test]
+    fn caller_index_cache_rebuilds_after_invalidate() {
+        let (dir, store) = build_chain_pgs();
+        let cache = CallerIndexCache::new(Duration::from_secs(60));
+        let first = cache.get_or_build(dir.path(), &store).expect("first");
+        cache.invalidate(dir.path());
+        let second = cache.get_or_build(dir.path(), &store).expect("rebuild");
+        assert!(
+            !Arc::ptr_eq(&first, &second),
+            "invalidate must force a fresh build on the next get_or_build"
         );
     }
 }

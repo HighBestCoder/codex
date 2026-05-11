@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use codex_call_graph_perception::{
     build_runtime_so, demangle_cpp_simple, read_events_jsonl, reconstruct_from_events,
-    FinstrumentBuildOptions, FinstrumentError, ReconstructError,
+    FinstrumentBuildOptions, FinstrumentError, ReconstructError, TraceWorktree, WorktreeError,
 };
 use codex_call_graph_store::{
     CallGraphStoreError, EdgeSource, GraphStore, ParsedFile, RawCallEdge, RawTarget,
@@ -31,6 +31,12 @@ pub enum TraceError {
     Reconstruct(#[from] ReconstructError),
     #[error("store error: {0}")]
     Store(#[from] CallGraphStoreError),
+    #[error("worktree error: {0}")]
+    Worktree(#[from] WorktreeError),
+    #[error("cmake configure failed (exit {code:?}): {stderr}")]
+    CmakeConfigure { code: Option<i32>, stderr: String },
+    #[error("cmake build failed (exit {code:?}): {stderr}")]
+    CmakeBuild { code: Option<i32>, stderr: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -43,6 +49,8 @@ pub struct TraceRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TraceResponse {
     pub project_root: String,
+    pub working_dir: String,
+    pub rebuilt_in_worktree: bool,
     pub runtime_so: String,
     pub events_path: String,
     pub event_count: u64,
@@ -73,10 +81,14 @@ pub fn run_trace(req: &TraceRequest) -> Result<TraceResponse, TraceError> {
     let events_path = cache_dir.join("trace-events.jsonl");
     let _ = std::fs::remove_file(&events_path);
 
+    let prepared = prepare_run_dir(&project_root)?;
+    let working_dir = prepared.run_dir.clone();
+    let rebuilt_in_worktree = prepared.worktree.is_some();
+
     let (program, args) = req.test_command.split_first().expect("non-empty checked");
     let status = Command::new(program)
         .args(args)
-        .current_dir(&project_root)
+        .current_dir(&working_dir)
         .env("LD_PRELOAD", &so_path)
         .env("CLAW_TRACE_OUTPUT", &events_path)
         .status()?;
@@ -109,9 +121,12 @@ pub fn run_trace(req: &TraceRequest) -> Result<TraceResponse, TraceError> {
     };
     store.upsert_file(&parsed)?;
     store.flush()?;
+    drop(prepared);
 
     Ok(TraceResponse {
         project_root: project_root.display().to_string(),
+        working_dir: working_dir.display().to_string(),
+        rebuilt_in_worktree,
         runtime_so: so_path.display().to_string(),
         events_path: events_path.display().to_string(),
         event_count,
@@ -122,5 +137,65 @@ pub fn run_trace(req: &TraceRequest) -> Result<TraceResponse, TraceError> {
     })
 }
 
-#[allow(dead_code)]
-fn _ensure_path_lives(_: &Path) {}
+struct PreparedRun {
+    run_dir: PathBuf,
+    worktree: Option<TraceWorktree>,
+}
+
+fn prepare_run_dir(project_root: &Path) -> Result<PreparedRun, TraceError> {
+    if !is_cmake_project(project_root) {
+        return Ok(PreparedRun {
+            run_dir: project_root.to_path_buf(),
+            worktree: None,
+        });
+    }
+    if !is_git_repo(project_root) {
+        return Ok(PreparedRun {
+            run_dir: project_root.to_path_buf(),
+            worktree: None,
+        });
+    }
+    let worktree = TraceWorktree::create(project_root)?;
+    let build_dir = worktree.path.join("build");
+    let _ = std::fs::remove_dir_all(&build_dir);
+    let configure = Command::new("cmake")
+        .arg("-B")
+        .arg(&build_dir)
+        .arg("-S")
+        .arg(&worktree.path)
+        .arg("-DCMAKE_C_FLAGS=-finstrument-functions -g -O0")
+        .arg("-DCMAKE_CXX_FLAGS=-finstrument-functions -g -O0")
+        .arg("-DCMAKE_EXE_LINKER_FLAGS=-rdynamic")
+        .arg("-DCMAKE_SHARED_LINKER_FLAGS=-rdynamic")
+        .arg("-DCMAKE_EXPORT_COMPILE_COMMANDS=ON")
+        .output()?;
+    if !configure.status.success() {
+        return Err(TraceError::CmakeConfigure {
+            code: configure.status.code(),
+            stderr: String::from_utf8_lossy(&configure.stderr).into_owned(),
+        });
+    }
+    let build = Command::new("cmake")
+        .args(["--build"])
+        .arg(&build_dir)
+        .arg("--parallel")
+        .output()?;
+    if !build.status.success() {
+        return Err(TraceError::CmakeBuild {
+            code: build.status.code(),
+            stderr: String::from_utf8_lossy(&build.stderr).into_owned(),
+        });
+    }
+    Ok(PreparedRun {
+        run_dir: worktree.path.clone(),
+        worktree: Some(worktree),
+    })
+}
+
+fn is_cmake_project(root: &Path) -> bool {
+    root.join("CMakeLists.txt").is_file()
+}
+
+fn is_git_repo(root: &Path) -> bool {
+    root.join(".git").exists()
+}

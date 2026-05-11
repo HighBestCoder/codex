@@ -33,9 +33,11 @@ codex-call-graph-algo = { workspace = true }
 codex-call-graph-perception = { workspace = true }
 codex-call-graph-store = { workspace = true }
 codex-call-graph-tools = { workspace = true }
+codex-client = { workspace = true }
 codex-code-mode = { workspace = true }
 codex-connectors = { workspace = true }
 codex-config = { workspace = true }
+codex-copilot-bridge = { workspace = true }
 codex-core-plugins = { workspace = true }
 codex-core-skills = { workspace = true }
 codex-exec-server = { workspace = true }

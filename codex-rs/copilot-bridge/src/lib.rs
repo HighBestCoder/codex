@@ -3,6 +3,7 @@ mod bridge;
 mod chat;
 mod error;
 mod responses;
+mod transport;
 
 pub use auth::{
     CopilotAuth, StoredAuth, COPILOT_DEFAULT_ENDPOINT, COPILOT_EDITOR_VERSION,
@@ -20,3 +21,4 @@ pub use responses::{
     ContentItem, FunctionCallOutputPayload, ResponseItem, ResponsesRequest, ResponsesResponse,
     ResponsesUsage,
 };
+pub use transport::CopilotTransport;

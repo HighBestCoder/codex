@@ -88,6 +88,123 @@ impl LoadedGraph {
     pub fn node_id_at(&self, ix: NodeIndex) -> Option<NodeId> {
         self.graph.node_weight(ix).copied()
     }
+
+    /// Build a graph that only covers nodes within `max_radius` BFS hops of
+    /// any seed, capped at `max_nodes` total. Lets callers (e.g. graph_plan
+    /// on a 530-file project) run Steiner / topo on a few hundred nodes
+    /// instead of the full call graph.
+    pub fn from_pgs_bounded(
+        pgs: &GraphStore,
+        seeds: &[NodeId],
+        max_radius: usize,
+        max_nodes: usize,
+    ) -> Result<Self, GraphAlgoError> {
+        let callers_by_callee = build_simple_name_caller_index(pgs)?;
+
+        let mut collected: HashSet<NodeId> = HashSet::new();
+        let mut frontier: Vec<NodeId> = Vec::new();
+        for &seed in seeds {
+            if pgs.node(seed)?.is_some() && collected.insert(seed) {
+                frontier.push(seed);
+            }
+        }
+
+        for _hop in 0..max_radius {
+            if collected.len() >= max_nodes || frontier.is_empty() {
+                break;
+            }
+            let mut next_frontier: Vec<NodeId> = Vec::new();
+            for node_id in frontier.drain(..) {
+                for edge in pgs.out_edges(node_id)? {
+                    if let Some(callee_id) = callee_node_id_for_edge(pgs, &edge)?.first().copied() {
+                        if collected.insert(callee_id) {
+                            next_frontier.push(callee_id);
+                            if collected.len() >= max_nodes {
+                                break;
+                            }
+                        }
+                    }
+                }
+                if collected.len() >= max_nodes {
+                    break;
+                }
+                if let Some(callers) = callers_by_callee.get(&node_id) {
+                    for &caller in callers {
+                        if collected.insert(caller) {
+                            next_frontier.push(caller);
+                            if collected.len() >= max_nodes {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            if collected.len() >= max_nodes {
+                break;
+            }
+            frontier = next_frontier;
+        }
+
+        Self::build_from_node_set(pgs, &collected, &callers_by_callee)
+    }
+
+    fn build_from_node_set(
+        pgs: &GraphStore,
+        node_ids: &HashSet<NodeId>,
+        callers_by_callee: &HashMap<NodeId, Vec<NodeId>>,
+    ) -> Result<Self, GraphAlgoError> {
+        let mut graph = DiGraph::<NodeId, EdgeWeight>::new();
+        let mut by_node_id: HashMap<NodeId, NodeIndex> = HashMap::new();
+        for &id in node_ids {
+            let nx = graph.add_node(id);
+            by_node_id.insert(id, nx);
+        }
+        for &caller_id in node_ids {
+            let Some(&caller_ix) = by_node_id.get(&caller_id) else {
+                continue;
+            };
+            for edge in pgs.out_edges(caller_id)? {
+                let weight = EdgeWeight {
+                    source: edge.source,
+                    confidence: edge.confidence,
+                };
+                for callee_id in callee_node_id_for_edge(pgs, &edge)? {
+                    if let Some(&callee_ix) = by_node_id.get(&callee_id) {
+                        graph.add_edge(caller_ix, callee_ix, weight);
+                    }
+                }
+            }
+            let _ = callers_by_callee;
+        }
+        Ok(Self { graph, by_node_id })
+    }
+}
+
+fn build_simple_name_caller_index(
+    pgs: &GraphStore,
+) -> Result<HashMap<NodeId, Vec<NodeId>>, GraphAlgoError> {
+    let mut index: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    for edge_result in pgs.iter_out_edges() {
+        let edge: CallEdge = edge_result?;
+        let callee_ids = callee_node_id_for_edge(pgs, &edge)?;
+        for callee_id in callee_ids {
+            index.entry(callee_id).or_default().push(edge.caller_id);
+        }
+    }
+    Ok(index)
+}
+
+fn callee_node_id_for_edge(
+    pgs: &GraphStore,
+    edge: &CallEdge,
+) -> Result<Vec<NodeId>, GraphAlgoError> {
+    match &edge.target {
+        ResolvedTarget::Resolved { callee_id } => Ok(vec![*callee_id]),
+        ResolvedTarget::Simple { callee_name } => {
+            let hits = pgs.nodes_by_name(callee_name)?;
+            Ok(hits.into_iter().map(|n| n.id).collect())
+        }
+    }
 }
 
 pub fn scc_components(g: &LoadedGraph) -> Vec<Vec<NodeId>> {
@@ -428,5 +545,42 @@ mod tests {
         assert!(sub.contains(&c));
         let b = store.nodes_by_name("b").expect("by_name")[0].id;
         assert!(sub.contains(&b), "intermediate node b should be on the BFS path");
+    }
+
+    #[test]
+    fn from_pgs_bounded_only_loads_seed_neighborhood() {
+        let (_dir, store) = build_chain_pgs();
+        let a = store.nodes_by_name("a").expect("by_name")[0].id;
+        let g = LoadedGraph::from_pgs_bounded(&store, &[a], 1, 100).expect("bounded");
+        assert!(g.lookup(a).is_some(), "seed must be present");
+        let b = store.nodes_by_name("b").expect("by_name")[0].id;
+        assert!(g.lookup(b).is_some(), "1-hop neighbor must be present");
+        let c = store.nodes_by_name("c").expect("by_name")[0].id;
+        assert!(g.lookup(c).is_none(), "2-hops-away node must NOT be present at radius=1");
+    }
+
+    #[test]
+    fn from_pgs_bounded_respects_max_nodes_cap() {
+        let (_dir, store) = build_chain_pgs();
+        let a = store.nodes_by_name("a").expect("by_name")[0].id;
+        let g = LoadedGraph::from_pgs_bounded(&store, &[a], 99, 2).expect("bounded");
+        assert!(
+            g.node_count() <= 2,
+            "max_nodes cap must be honored, got {} nodes",
+            g.node_count()
+        );
+        assert!(g.lookup(a).is_some(), "seed must be retained even when capped");
+    }
+
+    #[test]
+    fn from_pgs_bounded_includes_simple_name_callers() {
+        let (_dir, store) = build_chain_pgs();
+        let b = store.nodes_by_name("b").expect("by_name")[0].id;
+        let g = LoadedGraph::from_pgs_bounded(&store, &[b], 1, 100).expect("bounded");
+        let a = store.nodes_by_name("a").expect("by_name")[0].id;
+        assert!(
+            g.lookup(a).is_some(),
+            "a calls b via simple-name; bounded BFS must walk the inverse index"
+        );
     }
 }

@@ -87,9 +87,9 @@ pub fn run_plan(req: &PlanRequest) -> Result<PlanResponse, PlanError> {
         });
     }
 
-    let loaded = LoadedGraph::from_pgs(&store)?;
     let max_depth = req.max_path_depth.unwrap_or(6);
     let max_size = req.max_subgraph_size.unwrap_or(50);
+    let loaded = LoadedGraph::from_pgs_bounded(&store, &seed_node_ids, max_depth, max_size)?;
     let covered: HashSet<NodeId> = steiner_subgraph(&loaded, &seed_node_ids, max_depth, max_size);
 
     let mut subgraph_points: Vec<SymbolPoint> = Vec::with_capacity(covered.len());

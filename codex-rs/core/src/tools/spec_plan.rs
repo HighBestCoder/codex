@@ -395,6 +395,14 @@ pub fn build_tool_registry_builder(
                     }),
                     /*supports_parallel_tool_calls*/ false,
                 );
+            } else if !config.namespace_tools {
+                for entry in tools {
+                    let ResponsesApiNamespaceTool::Function(tool) = entry;
+                    builder.push_spec(
+                        ToolSpec::Function(tool),
+                        /*supports_parallel_tool_calls*/ false,
+                    );
+                }
             }
         }
     }

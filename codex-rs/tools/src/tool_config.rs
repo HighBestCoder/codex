@@ -116,6 +116,7 @@ pub struct ToolsConfig {
     pub can_request_original_image_detail: bool,
     pub collab_tools: bool,
     pub goal_tools: bool,
+    pub call_graph_tools: bool,
     pub multi_agent_v2: bool,
     pub hide_spawn_agent_metadata: bool,
     pub spawn_agent_usage_hint: bool,
@@ -253,6 +254,7 @@ impl ToolsConfig {
             can_request_original_image_detail: include_original_image_detail,
             collab_tools: include_collab_tools,
             goal_tools: include_goal_tools,
+            call_graph_tools: true,
             multi_agent_v2: include_multi_agent_v2,
             hide_spawn_agent_metadata: false,
             spawn_agent_usage_hint: true,
@@ -313,6 +315,11 @@ impl ToolsConfig {
 
     pub fn with_goal_tools_allowed(mut self, allowed: bool) -> Self {
         self.goal_tools = self.goal_tools && allowed;
+        self
+    }
+
+    pub fn with_call_graph_tools(mut self, enabled: bool) -> Self {
+        self.call_graph_tools = enabled;
         self
     }
 

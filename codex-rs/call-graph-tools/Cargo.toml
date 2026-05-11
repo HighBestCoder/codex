@@ -1,0 +1,27 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "codex-call-graph-tools"
+version.workspace = true
+
+[lib]
+name = "codex_call_graph_tools"
+path = "src/lib.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+blake3 = "1"
+codex-call-graph-algo = { workspace = true }
+codex-call-graph-perception = { workspace = true }
+codex-call-graph-store = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }

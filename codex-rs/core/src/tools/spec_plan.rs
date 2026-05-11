@@ -8,6 +8,10 @@ use crate::tools::handlers::DynamicToolHandler;
 use crate::tools::handlers::ExecCommandHandler;
 use crate::tools::handlers::ExecCommandHandlerOptions;
 use crate::tools::handlers::GetGoalHandler;
+use crate::tools::handlers::GraphMapHandler;
+use crate::tools::handlers::GraphPlanHandler;
+use crate::tools::handlers::GraphTraceHandler;
+use crate::tools::handlers::GraphWhyHandler;
 use crate::tools::handlers::ListMcpResourceTemplatesHandler;
 use crate::tools::handlers::ListMcpResourcesHandler;
 use crate::tools::handlers::LocalShellHandler;
@@ -199,6 +203,13 @@ pub fn build_tool_registry_builder(
         builder.register_handler(Arc::new(GetGoalHandler));
         builder.register_handler(Arc::new(CreateGoalHandler));
         builder.register_handler(Arc::new(UpdateGoalHandler));
+    }
+
+    if config.call_graph_tools {
+        builder.register_handler(Arc::new(GraphMapHandler));
+        builder.register_handler(Arc::new(GraphWhyHandler));
+        builder.register_handler(Arc::new(GraphPlanHandler));
+        builder.register_handler(Arc::new(GraphTraceHandler));
     }
 
     builder.register_handler(Arc::new(RequestUserInputHandler {

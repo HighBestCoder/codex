@@ -12,10 +12,10 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::map::{MapRequest, MapResponse, run_map};
-use crate::plan::{PlanRequest, PlanResponse, run_plan};
-use crate::trace::{TraceRequest, TraceResponse, run_trace};
-use crate::why::{WhyRequest, WhyResponse, run_why};
+use codex_call_graph_tools::{
+    run_map, run_plan, run_trace, run_why, MapRequest, MapResponse, PlanRequest, PlanResponse,
+    TraceRequest, TraceResponse, WhyRequest, WhyResponse,
+};
 
 const MAP_TOOL: &str = "graph_map";
 const PLAN_TOOL: &str = "graph_plan";

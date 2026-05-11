@@ -74,6 +74,20 @@ async fn create_response(
         request.tools.len(),
         request.stream
     );
+    if !request.tools.is_empty() {
+        let names: Vec<String> = request
+            .tools
+            .iter()
+            .filter_map(|t| {
+                let obj = t.as_object()?;
+                obj.get("name")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| obj.get("function").and_then(|f| f.get("name")).and_then(|v| v.as_str()))
+                    .map(|s| s.to_string())
+            })
+            .collect();
+        tracing::info!("tool names: {names:?}");
+    }
     let want_stream = request.stream;
     let result = state.responses.create_response(&request).await;
     match result {

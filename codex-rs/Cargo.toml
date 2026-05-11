@@ -104,6 +104,7 @@ members = [
     "copilot-bridge",
     "copilot-bridge-server",
     "call-graph-store",
+    "call-graph-perception",
     "state",
     "terminal-detection",
     "test-binary-support",
@@ -158,6 +159,7 @@ codex-connectors = { path = "connectors" }
 codex-copilot-bridge = { path = "copilot-bridge" }
 codex-copilot-bridge-server = { path = "copilot-bridge-server" }
 codex-call-graph-store = { path = "call-graph-store" }
+codex-call-graph-perception = { path = "call-graph-perception" }
 codex-core = { path = "core" }
 codex-core-api = { path = "core-api" }
 codex-core-plugins = { path = "core-plugins" }

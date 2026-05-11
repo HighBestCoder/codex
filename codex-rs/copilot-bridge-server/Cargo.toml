@@ -1,0 +1,34 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "codex-copilot-bridge-server"
+version.workspace = true
+
+[[bin]]
+name = "codex-copilot-proxy"
+path = "src/main.rs"
+
+[lib]
+name = "codex_copilot_bridge_server"
+path = "src/lib.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+axum = { workspace = true, features = ["json", "tokio", "http1"] }
+clap = { workspace = true, features = ["derive", "env"] }
+codex-copilot-bridge = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "signal"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+reqwest = { workspace = true, features = ["json", "rustls-tls", "stream"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }

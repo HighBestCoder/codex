@@ -53,8 +53,9 @@ pub fn responses_request_to_chat(req: &ResponsesRequest) -> ChatRequest {
 
     let mut chat = ChatRequest::new(req.model.clone(), messages);
     chat.stream = Some(false);
-    if !req.tools.is_empty() {
-        chat.tools = req.tools.clone();
+    let chat_tools = filter_chat_compatible_tools(&req.tools);
+    if !chat_tools.is_empty() {
+        chat.tools = chat_tools;
         if !req.tool_choice.is_empty() {
             chat.tool_choice = Some(serde_json::Value::String(req.tool_choice.clone()));
         }
@@ -63,6 +64,49 @@ pub fn responses_request_to_chat(req: &ResponsesRequest) -> ChatRequest {
         }
     }
     chat
+}
+
+fn filter_chat_compatible_tools(tools: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    tools
+        .iter()
+        .filter_map(normalize_function_tool_to_chat)
+        .collect()
+}
+
+fn normalize_function_tool_to_chat(tool: &serde_json::Value) -> Option<serde_json::Value> {
+    let obj = tool.as_object()?;
+    let kind = obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    if kind != "function" {
+        return None;
+    }
+
+    if let Some(function) = obj.get("function").and_then(|v| v.as_object()) {
+        let name = function.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        if name.is_empty() {
+            return None;
+        }
+        return Some(tool.clone());
+    }
+
+    let name = obj.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    if name.is_empty() {
+        return None;
+    }
+    let mut function = serde_json::Map::new();
+    function.insert("name".into(), serde_json::Value::String(name.to_string()));
+    if let Some(desc) = obj.get("description").cloned() {
+        function.insert("description".into(), desc);
+    }
+    if let Some(params) = obj.get("parameters").cloned() {
+        function.insert("parameters".into(), params);
+    }
+    if let Some(strict) = obj.get("strict").cloned() {
+        function.insert("strict".into(), strict);
+    }
+    let mut out = serde_json::Map::new();
+    out.insert("type".into(), serde_json::Value::String("function".into()));
+    out.insert("function".into(), serde_json::Value::Object(function));
+    Some(serde_json::Value::Object(out))
 }
 
 pub fn chat_response_to_responses(
@@ -414,5 +458,119 @@ mod tests {
             Some("auto")
         );
         assert_eq!(chat.parallel_tool_calls, Some(true));
+    }
+
+    #[test]
+    fn non_function_tools_are_dropped_before_forwarding_to_chat() {
+        let req = ResponsesRequest {
+            model: "gpt-4o".into(),
+            instructions: String::new(),
+            input: vec![ResponseItem::Message {
+                id: None,
+                role: "user".into(),
+                content: vec![ContentItem::InputText { text: "hi".into() }],
+            }],
+            tools: vec![
+                serde_json::json!({"type": "local_shell"}),
+                serde_json::json!({"type": "web_search_preview"}),
+                serde_json::json!({"type": "function", "function": {"name": "good_tool"}}),
+                serde_json::json!({"type": "function", "function": {"name": ""}}),
+            ],
+            tool_choice: "auto".into(),
+            parallel_tool_calls: false,
+            stream: false,
+        };
+        let chat = responses_request_to_chat(&req);
+        assert_eq!(chat.tools.len(), 1);
+        assert_eq!(
+            chat.tools[0]["function"]["name"], "good_tool"
+        );
+        assert_eq!(chat.tool_choice.as_ref().and_then(|v| v.as_str()), Some("auto"));
+    }
+
+    #[test]
+    fn tool_choice_dropped_when_only_incompatible_tools_present() {
+        let req = ResponsesRequest {
+            model: "gpt-4o".into(),
+            instructions: String::new(),
+            input: vec![ResponseItem::Message {
+                id: None,
+                role: "user".into(),
+                content: vec![ContentItem::InputText { text: "hi".into() }],
+            }],
+            tools: vec![serde_json::json!({"type": "local_shell"})],
+            tool_choice: "auto".into(),
+            parallel_tool_calls: true,
+            stream: false,
+        };
+        let chat = responses_request_to_chat(&req);
+        assert!(chat.tools.is_empty());
+        assert!(
+            chat.tool_choice.is_none(),
+            "tool_choice must be dropped when all tools were filtered out"
+        );
+        assert!(chat.parallel_tool_calls.is_none());
+    }
+
+    #[test]
+    fn flat_responses_function_tool_is_normalized_to_nested_chat_shape() {
+        let req = ResponsesRequest {
+            model: "gpt-4o".into(),
+            instructions: String::new(),
+            input: vec![ResponseItem::Message {
+                id: None,
+                role: "user".into(),
+                content: vec![ContentItem::InputText { text: "hi".into() }],
+            }],
+            tools: vec![serde_json::json!({
+                "type": "function",
+                "name": "exec_command",
+                "description": "Run a command",
+                "parameters": {"type": "object", "properties": {}},
+                "strict": false
+            })],
+            tool_choice: "auto".into(),
+            parallel_tool_calls: false,
+            stream: false,
+        };
+        let chat = responses_request_to_chat(&req);
+        assert_eq!(chat.tools.len(), 1);
+        let tool = &chat.tools[0];
+        assert_eq!(tool["type"], "function");
+        assert_eq!(tool["function"]["name"], "exec_command");
+        assert_eq!(tool["function"]["description"], "Run a command");
+        assert!(tool["function"]["parameters"]["type"] == "object");
+        assert_eq!(tool["function"]["strict"], false);
+        assert!(
+            tool.get("name").is_none(),
+            "flat fields must be rewritten under function:"
+        );
+    }
+
+    #[test]
+    fn already_nested_chat_function_tool_passes_through_unchanged() {
+        let req = ResponsesRequest {
+            model: "gpt-4o".into(),
+            instructions: String::new(),
+            input: vec![ResponseItem::Message {
+                id: None,
+                role: "user".into(),
+                content: vec![ContentItem::InputText { text: "hi".into() }],
+            }],
+            tools: vec![serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": "already_nested",
+                    "description": "...",
+                    "parameters": {"type": "object"}
+                }
+            })],
+            tool_choice: "auto".into(),
+            parallel_tool_calls: false,
+            stream: false,
+        };
+        let chat = responses_request_to_chat(&req);
+        assert_eq!(chat.tools.len(), 1);
+        assert_eq!(chat.tools[0]["function"]["name"], "already_nested");
     }
 }

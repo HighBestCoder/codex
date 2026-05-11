@@ -83,7 +83,7 @@ impl<'de> Deserialize<'de> for FunctionCallOutputPayload {
     }
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ResponsesRequest {
     pub model: String,
     #[serde(skip_serializing_if = "String::is_empty", default)]

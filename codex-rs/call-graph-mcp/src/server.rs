@@ -13,9 +13,11 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::map::{MapRequest, MapResponse, run_map};
+use crate::plan::{PlanRequest, PlanResponse, run_plan};
 use crate::why::{WhyRequest, WhyResponse, run_why};
 
 const MAP_TOOL: &str = "graph_map";
+const PLAN_TOOL: &str = "graph_plan";
 const WHY_TOOL: &str = "graph_why";
 
 #[derive(Clone, Default)]
@@ -26,7 +28,7 @@ pub struct CallGraphMcpServer {
 impl CallGraphMcpServer {
     pub fn new() -> Self {
         Self {
-            tools: Arc::new(vec![map_tool(), why_tool()]),
+            tools: Arc::new(vec![map_tool(), why_tool(), plan_tool()]),
         }
     }
 }
@@ -89,6 +91,14 @@ impl ServerHandler for CallGraphMcpServer {
                     .map_err(|err| McpError::internal_error(err.to_string(), None))?;
                 json!(resp)
             }
+            PLAN_TOOL => {
+                let req: PlanRequest = parse_args(value)?;
+                let resp = tokio::task::spawn_blocking(move || run_plan(&req))
+                    .await
+                    .map_err(|err| McpError::internal_error(err.to_string(), None))?
+                    .map_err(|err| McpError::internal_error(err.to_string(), None))?;
+                json!(resp)
+            }
             other => {
                 return Err(McpError::invalid_params(
                     format!("unknown tool: {other}"),
@@ -144,6 +154,22 @@ fn why_tool() -> Tool {
         Arc::new(input_schema::<WhyRequest>()),
     );
     tool.output_schema = Some(Arc::new(output_schema::<WhyResponse>()));
+    tool.annotations = Some(ToolAnnotations::new().read_only(true));
+    tool
+}
+
+fn plan_tool() -> Tool {
+    let mut tool = Tool::new(
+        Cow::Borrowed(PLAN_TOOL),
+        Cow::Borrowed(
+            "Given one or more seed function names, return the Steiner subgraph that \
+             connects them together with a topological ordering and any cycle warning. \
+             Use this to plan an edit that touches multiple symbols: the subgraph is the \
+             minimal set of related functions, and topo_order suggests a safe walk order.",
+        ),
+        Arc::new(input_schema::<PlanRequest>()),
+    );
+    tool.output_schema = Some(Arc::new(output_schema::<PlanResponse>()));
     tool.annotations = Some(ToolAnnotations::new().read_only(true));
     tool
 }

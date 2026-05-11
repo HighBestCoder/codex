@@ -1,10 +1,12 @@
 mod map;
 mod pgs_path;
+mod plan;
 mod server;
 mod why;
 
 pub use map::{MapError, MapRequest, MapResponse, run_map};
 pub use pgs_path::pgs_path_for;
+pub use plan::{PlanError, PlanRequest, PlanResponse, SymbolPoint, run_plan};
 pub use server::{CallGraphMcpServer, run_server, run_stdio_server};
 pub use why::{EdgeRef, WhyError, WhyMatch, WhyRequest, WhyResponse, run_why};
 
@@ -110,6 +112,76 @@ mod e2e_tests {
                 assert_eq!(p, PathBuf::from("relative/path"));
             }
             other => panic!("expected NotAbsolute, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_plan_returns_subgraph_covering_seeds() {
+        let dir = project_with_two_rust_files();
+        let project_root = dir.path().canonicalize().expect("canon").display().to_string();
+        run_map(&MapRequest {
+            project_root: project_root.clone(),
+        })
+        .expect("map");
+
+        let resp = run_plan(&PlanRequest {
+            project_root,
+            seed_symbols: vec!["double".into(), "quadruple".into()],
+            max_path_depth: Some(6),
+            max_subgraph_size: Some(50),
+        })
+        .expect("plan");
+
+        assert!(
+            resp.seeds_resolved.iter().any(|p| p.symbol == "double"),
+            "expected 'double' in seeds_resolved, got {:?}",
+            resp.seeds_resolved
+        );
+        assert!(
+            resp.seeds_resolved.iter().any(|p| p.symbol == "quadruple"),
+            "expected 'quadruple' in seeds_resolved"
+        );
+        assert!(resp.seeds_unresolved.is_empty());
+        let subgraph_symbols: Vec<&str> = resp.subgraph.iter().map(|p| p.symbol.as_str()).collect();
+        assert!(
+            subgraph_symbols.contains(&"double") && subgraph_symbols.contains(&"quadruple"),
+            "subgraph must cover both seeds, got {subgraph_symbols:?}"
+        );
+    }
+
+    #[test]
+    fn run_plan_reports_unresolved_seeds_without_failing() {
+        let dir = project_with_two_rust_files();
+        let project_root = dir.path().canonicalize().expect("canon").display().to_string();
+        run_map(&MapRequest {
+            project_root: project_root.clone(),
+        })
+        .expect("map");
+
+        let resp = run_plan(&PlanRequest {
+            project_root,
+            seed_symbols: vec!["double".into(), "does_not_exist".into()],
+            max_path_depth: None,
+            max_subgraph_size: None,
+        })
+        .expect("plan");
+
+        assert!(resp.seeds_resolved.iter().any(|p| p.symbol == "double"));
+        assert_eq!(resp.seeds_unresolved, vec!["does_not_exist".to_string()]);
+    }
+
+    #[test]
+    fn run_plan_rejects_empty_seeds() {
+        let dir = tempfile::tempdir().expect("dir");
+        let result = run_plan(&PlanRequest {
+            project_root: dir.path().canonicalize().expect("canon").display().to_string(),
+            seed_symbols: Vec::new(),
+            max_path_depth: None,
+            max_subgraph_size: None,
+        });
+        match result {
+            Err(PlanError::NoSeeds) => {}
+            other => panic!("expected NoSeeds, got {other:?}"),
         }
     }
 }

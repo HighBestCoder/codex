@@ -19,6 +19,7 @@ workspace = true
 [dependencies]
 anyhow = { workspace = true }
 blake3 = "1"
+codex-call-graph-algo = { workspace = true }
 codex-call-graph-perception = { workspace = true }
 codex-call-graph-store = { workspace = true }
 rmcp = { workspace = true, default-features = false, features = ["schemars", "server", "transport-async-rw"] }

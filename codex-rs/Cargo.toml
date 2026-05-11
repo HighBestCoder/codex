@@ -102,7 +102,6 @@ members = [
     "codex-client",
     "codex-api",
     "copilot-bridge",
-    "copilot-bridge-server",
     "call-graph-store",
     "call-graph-perception",
     "call-graph-algo",
@@ -159,7 +158,6 @@ codex-code-mode = { path = "code-mode" }
 codex-config = { path = "config" }
 codex-connectors = { path = "connectors" }
 codex-copilot-bridge = { path = "copilot-bridge" }
-codex-copilot-bridge-server = { path = "copilot-bridge-server" }
 codex-call-graph-store = { path = "call-graph-store" }
 codex-call-graph-perception = { path = "call-graph-perception" }
 codex-call-graph-algo = { path = "call-graph-algo" }

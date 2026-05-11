@@ -2580,6 +2580,10 @@ name = "codex-copilot-bridge"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "bytes",
+ "codex-client",
+ "futures",
+ "http 1.4.0",
  "pretty_assertions",
  "reqwest",
  "serde",
@@ -2588,24 +2592,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
-]
-
-[[package]]
-name = "codex-copilot-bridge-server"
-version = "0.0.0"
-dependencies = [
- "axum",
- "clap",
- "codex-copilot-bridge",
- "futures",
- "pretty_assertions",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -2631,9 +2617,11 @@ dependencies = [
  "codex-call-graph-perception",
  "codex-call-graph-store",
  "codex-call-graph-tools",
+ "codex-client",
  "codex-code-mode",
  "codex-config",
  "codex-connectors",
+ "codex-copilot-bridge",
  "codex-core-plugins",
  "codex-core-skills",
  "codex-exec-server",
@@ -3853,6 +3841,7 @@ dependencies = [
  "codex-app-server-client",
  "codex-app-server-protocol",
  "codex-arg0",
+ "codex-call-graph-tools",
  "codex-chatgpt",
  "codex-cli",
  "codex-cloud-requirements",

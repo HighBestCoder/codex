@@ -1,16 +1,19 @@
 # Codex Call-Graph Tools
 
 Build a project-local call graph, expose it to the model as **native
-in-process tools**, and (optionally) drive Codex through GitHub Copilot
-using a local chat-to-responses proxy.
+in-process tools**, and drive Codex through GitHub Copilot with a fully
+embedded chat<->responses bridge (no separate proxy process).
 
 ## Why this exists
 
 Codex's default model providers only speak the OpenAI Responses API.
 GitHub Copilot speaks chat/completions. This tree ships:
 
-1. A **Copilot bridge** (proxy) that lets Codex run unchanged on
-   Copilot-served models.
+1. A **Copilot bridge** that lives inside `codex` itself as a custom
+   `HttpTransport`. When the active provider is `copilot`, codex
+   short-circuits its reqwest path and routes Responses requests
+   through `CopilotTransport`, which translates them to chat/completions
+   and back. No localhost daemon required.
 2. A **call-graph engine** (store / perception / algo) that can index
    Rust, C, and C++ projects.
 3. **Four native Codex tools** (`graph_map`, `graph_why`,
@@ -18,19 +21,19 @@ GitHub Copilot speaks chat/completions. This tree ships:
    `ToolHandler`s next to `ApplyPatchHandler`, plus matching slash
    commands (`/graph-map` etc.).
 
-Zero MCP child process; everything runs inside `codex` itself.
+Zero MCP child process, zero HTTP proxy daemon; everything runs inside
+the `codex` binary itself.
 
 ## Crates in this tree
 
 | Crate | Role |
 |---|---|
-| `codex-copilot-bridge` | Standalone library: OAuth + session-token refresh, chat-completions client, Responses<->chat translation. No `codex-*` dependencies. |
-| `codex-copilot-bridge-server` | Binary `codex-copilot-proxy`. axum HTTP server that owns `/healthz`, `/v1/models`, `/v1/responses`. |
+| `codex-copilot-bridge` | OAuth + session-token refresh, chat-completions client, Responses<->chat translation, **`CopilotTransport` (`impl HttpTransport`)**. No `codex-*` deps. |
 | `codex-call-graph-store` | sled-backed embedded graph DB. Schema is byte-for-byte compatible with claw-pgs. |
 | `codex-call-graph-perception` | Source parsers: syn (Rust), tree-sitter (C/C++), SCIP (rust-analyzer / scip-clang), dynamic finstrument runtime + event reconstruction, git history. |
-| `codex-call-graph-algo` | petgraph-backed algorithms: SCC, topo sort, PageRank, BFS, Steiner subgraph, bounded loader. |
+| `codex-call-graph-algo` | petgraph-backed algorithms: SCC, topo sort, PageRank, BFS, Steiner subgraph, bounded loader, `CallerIndexCache`. |
 | `codex-call-graph-tools` | Pure `run_map` / `run_why` / `run_plan` / `run_trace` entry points + request/response types. |
-| `codex-core` (extended) | Hosts the four `GraphMapHandler` / `GraphWhyHandler` / `GraphPlanHandler` / `GraphTraceHandler` impls plus their `ToolSpec` builders under `core/src/tools/handlers/call_graph{,_spec}.rs`. |
+| `codex-core` (extended) | Hosts the four `Graph*Handler` impls plus the `CodexTransport` enum (`Reqwest \| Copilot`) and the `build_transport_for_provider` factory. |
 
 ## One-time setup
 
@@ -38,17 +41,15 @@ Zero MCP child process; everything runs inside `codex` itself.
 
 ```bash
 cd codex-rs
-cargo build -p codex-cli                   --bin codex
-cargo build -p codex-copilot-bridge-server --bin codex-copilot-proxy
+cargo build -p codex-cli --bin codex
 ```
 
-(No third binary needed; the four graph tools live inside `codex`.)
+That's the only binary. No proxy server.
 
-### 2. Put the two binaries on PATH
+### 2. Put the binary on PATH
 
 ```bash
-sudo ln -sf $(pwd)/target/debug/codex                  /usr/local/bin/codex
-sudo ln -sf $(pwd)/target/debug/codex-copilot-proxy    /usr/local/bin/codex-copilot-proxy
+sudo ln -sf $(pwd)/target/release/codex /usr/local/bin/codex
 ```
 
 ### 3. Provide Copilot credentials
@@ -69,15 +70,20 @@ Drop the OAuth JSON at any of these locations (first match wins):
 }
 ```
 
+The bridge auto-refreshes the session token against
+`https://api.github.com/copilot_internal/v2/token` when needed.
+
 ### 4. `~/.codex/config.toml`
 
 ```toml
 model = "claude-opus-4.7-1m-internal"
 model_provider = "copilot"
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
 
 [model_providers.copilot]
-name = "GitHub Copilot (via local bridge)"
-base_url = "http://127.0.0.1:14318/v1"
+name = "copilot"
+base_url = "https://api.enterprise.githubcopilot.com"
 wire_api = "responses"
 namespace_tools = false
 requires_openai_auth = false
@@ -87,26 +93,33 @@ env_key = "COPILOT_PROXY_DUMMY_KEY"
 trust_level = "trusted"
 ```
 
-No `[mcp_servers.*]` section needed for the graph tools - they are
-native handlers compiled into `codex` itself.
+Key configuration choices, all defaults:
 
-### 5. Start the proxy (once per machine)
-
-```bash
-codex-copilot-proxy --port 14318 &
-```
+- `name = "copilot"` -- triggers the embedded `CopilotTransport`.
+- `approval_policy = "never"` + `sandbox_mode = "danger-full-access"`
+  -- so the model can run tools and shell without prompting.
+- `namespace_tools = false` -- exposes `graph_*` to the model directly
+  rather than behind `tool_search` namespacing.
+- No `[mcp_servers.*]` section needed; the graph tools are native
+  handlers.
+- No proxy / no localhost daemon -- `base_url` points at the real
+  Copilot endpoint but the embedded transport intercepts requests
+  before they leave the process.
 
 ## Daily use
 
-Three ways to drive the tools.
+Two ways to drive the tools.
 
 **(a) Free-form prompt** (let the model decide):
 ```bash
 COPILOT_PROXY_DUMMY_KEY=anything codex exec --skip-git-repo-check \
-  --dangerously-bypass-approvals-and-sandbox \
   --cd /path/to/your/project \
   "Use graph_map then graph_why to find every caller of foo()."
 ```
+
+`--dangerously-bypass-approvals-and-sandbox` is unnecessary now that
+the config sets `approval_policy = "never"` + `sandbox_mode =
+"danger-full-access"`.
 
 **(b) Slash commands** (in `codex` interactive TUI):
 ```
@@ -115,8 +128,8 @@ COPILOT_PROXY_DUMMY_KEY=anything codex exec --skip-git-repo-check \
 /graph-plan ValidateCollectionName Create Get
 /graph-trace ./build/my_tests
 ```
-Each slash injects a single-shot prompt that names the tool; the model
-then issues exactly one `tool_call` to the in-process handler.
+Slash commands execute the in-process handler directly and print the
+result into conversation history -- no LLM round trip.
 
 **(c) Direct exec command** (no TUI):
 ```bash
@@ -186,34 +199,29 @@ Real measurements on this host:
 
 ## Source touchpoints inside codex
 
-Stage 6 added:
+Stages 6 + 7 touch these files inside the `codex/` workspace:
 
-- `model-provider-info/src/lib.rs` — `namespace_tools` field (kept; useful for any opt-in MCP provider in the future).
+- `model-provider-info/src/lib.rs` — `namespace_tools` field.
 - `model-provider/src/provider.rs` — `ConfiguredModelProvider::capabilities()` reads it.
 - `core/src/tools/handlers/call_graph_spec.rs` — 4 `ToolSpec` builders.
 - `core/src/tools/handlers/call_graph.rs` — 4 `ToolHandler` impls.
 - `core/src/tools/handlers/mod.rs` — module + re-exports.
 - `core/src/tools/spec_plan.rs` — `if config.call_graph_tools { register all four }`.
+- `core/src/transport.rs` — `CodexTransport` enum + `build_transport_for_provider` factory.
+- `core/src/lib.rs` — `mod transport;`.
+- `core/src/client.rs` — 4 call sites swapped from `ReqwestTransport::new(...)` to `build_transport_for_provider(...)`.
 - `tools/src/tool_config.rs` — `call_graph_tools: bool` (default true) + `with_call_graph_tools` builder.
 - `tui/src/slash_command.rs` — 4 new variants with descriptions / inline-args / available-during-task entries.
-- `tui/src/chatwidget/slash_dispatch.rs` — dispatch arms that inject a single-shot prompt naming the tool.
-
-No other touchpoints. The original Stage 3.2 `namespace_tools` glue is
-left in place because it's still the correct behavior for *any*
-custom MCP provider running through the Copilot bridge; the graph
-tools just no longer rely on it.
+- `tui/src/chatwidget/slash_dispatch.rs` — dispatch arms that execute the in-process handler directly.
 
 ## Known limits / follow-ups
 
-- **`graph_trace --rebuild`**: worktree-based rebuild with the right
-  flags is not yet exposed; today the caller must build with
-  `-finstrument-functions -rdynamic` themselves.
-- **Cross-call cache**: `LoadedGraph::from_pgs_bounded` rebuilds the
-  callers-by-callee inverse index every call.
-- **scip-clang / rust-analyzer refresh**: the SCIP precise paths in
-  perception are present but `graph_map` only invokes the tree-sitter
-  / syn fast paths. A `refresh: bool` arg would wire them up.
-- **Slash command direct dispatch**: today `/graph-*` inject a prompt
-  the model has to act on; a follow-up could short-circuit straight to
-  the handler and append the result as a `tool_call_output` without a
-  model turn.
+- **`graph_trace` for cargo projects**: today only CMake + git projects
+  get the auto-rebuild-in-worktree path; cargo projects still need the
+  caller to inject the right rustc flags manually.
+- **scip-clang / rust-analyzer refresh policy**: `graph_map` runs SCIP
+  every call when the binary is on PATH. No "stale-cache" check yet, so
+  a re-map after a small change re-spawns scip-clang.
+- **Slash result formatting**: `/graph-plan` and `/graph-trace` print a
+  one-line summary; deep output (e.g. the full subgraph node list) is
+  not yet pretty-printed in the TUI history.

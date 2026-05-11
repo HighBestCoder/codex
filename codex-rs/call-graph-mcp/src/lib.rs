@@ -2,12 +2,14 @@ mod map;
 mod pgs_path;
 mod plan;
 mod server;
+mod trace;
 mod why;
 
 pub use map::{MapError, MapRequest, MapResponse, run_map};
 pub use pgs_path::pgs_path_for;
 pub use plan::{PlanError, PlanRequest, PlanResponse, SymbolPoint, UnresolvedCallee, run_plan};
 pub use server::{CallGraphMcpServer, run_server, run_stdio_server};
+pub use trace::{TraceError, TraceRequest, TraceResponse, run_trace, DYNAMIC_TRACE_FILE};
 pub use why::{EdgeRef, WhyError, WhyMatch, WhyRequest, WhyResponse, run_why};
 
 #[cfg(test)]
@@ -236,5 +238,52 @@ mod e2e_tests {
                 entry.call_line
             );
         }
+    }
+
+    #[test]
+    fn run_trace_rejects_empty_command() {
+        let dir = tempfile::tempdir().expect("dir");
+        let project_root = dir
+            .path()
+            .canonicalize()
+            .expect("canon")
+            .display()
+            .to_string();
+        let err = run_trace(&TraceRequest {
+            project_root,
+            test_command: Vec::new(),
+        })
+        .expect_err("empty command should fail");
+        assert!(matches!(err, TraceError::EmptyCommand), "got {err:?}");
+    }
+
+    #[test]
+    fn run_trace_rejects_relative_project_root() {
+        let err = run_trace(&TraceRequest {
+            project_root: "relative".into(),
+            test_command: vec!["true".into()],
+        })
+        .expect_err("relative path should fail");
+        match err {
+            TraceError::NotAbsolute(p) => assert_eq!(p, PathBuf::from("relative")),
+            other => panic!("expected NotAbsolute, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_trace_reports_pgs_missing_when_map_never_ran() {
+        let dir = tempfile::tempdir().expect("dir");
+        let project_root = dir
+            .path()
+            .canonicalize()
+            .expect("canon")
+            .display()
+            .to_string();
+        let err = run_trace(&TraceRequest {
+            project_root,
+            test_command: vec!["true".into()],
+        })
+        .expect_err("missing pgs should fail");
+        assert!(matches!(err, TraceError::PgsMissing { .. }), "got {err:?}");
     }
 }

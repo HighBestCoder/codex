@@ -14,10 +14,12 @@ use serde_json::{Value, json};
 
 use crate::map::{MapRequest, MapResponse, run_map};
 use crate::plan::{PlanRequest, PlanResponse, run_plan};
+use crate::trace::{TraceRequest, TraceResponse, run_trace};
 use crate::why::{WhyRequest, WhyResponse, run_why};
 
 const MAP_TOOL: &str = "graph_map";
 const PLAN_TOOL: &str = "graph_plan";
+const TRACE_TOOL: &str = "graph_trace";
 const WHY_TOOL: &str = "graph_why";
 
 #[derive(Clone, Default)]
@@ -28,7 +30,7 @@ pub struct CallGraphMcpServer {
 impl CallGraphMcpServer {
     pub fn new() -> Self {
         Self {
-            tools: Arc::new(vec![map_tool(), why_tool(), plan_tool()]),
+            tools: Arc::new(vec![map_tool(), why_tool(), plan_tool(), trace_tool()]),
         }
     }
 }
@@ -94,6 +96,14 @@ impl ServerHandler for CallGraphMcpServer {
             PLAN_TOOL => {
                 let req: PlanRequest = parse_args(value)?;
                 let resp = tokio::task::spawn_blocking(move || run_plan(&req))
+                    .await
+                    .map_err(|err| McpError::internal_error(err.to_string(), None))?
+                    .map_err(|err| McpError::internal_error(err.to_string(), None))?;
+                json!(resp)
+            }
+            TRACE_TOOL => {
+                let req: TraceRequest = parse_args(value)?;
+                let resp = tokio::task::spawn_blocking(move || run_trace(&req))
                     .await
                     .map_err(|err| McpError::internal_error(err.to_string(), None))?
                     .map_err(|err| McpError::internal_error(err.to_string(), None))?;
@@ -171,6 +181,23 @@ fn plan_tool() -> Tool {
     );
     tool.output_schema = Some(Arc::new(output_schema::<PlanResponse>()));
     tool.annotations = Some(ToolAnnotations::new().read_only(true));
+    tool
+}
+
+fn trace_tool() -> Tool {
+    let mut tool = Tool::new(
+        Cow::Borrowed(TRACE_TOOL),
+        Cow::Borrowed(
+            "Run a test binary under LD_PRELOAD with the call-graph runtime, capture every \
+             function enter/exit (gcc/clang -finstrument-functions; binary must be linked \
+             with -rdynamic), then write the observed call edges into the project's PGS \
+             under the synthetic <dynamic-trace> file with EdgeSource::Dynamic. Returns \
+             event count, unique edges, and the test binary's exit code.",
+        ),
+        Arc::new(input_schema::<TraceRequest>()),
+    );
+    tool.output_schema = Some(Arc::new(output_schema::<TraceResponse>()));
+    tool.annotations = Some(ToolAnnotations::new());
     tool
 }
 

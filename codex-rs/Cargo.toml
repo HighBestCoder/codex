@@ -101,6 +101,7 @@ members = [
     "utils/template",
     "codex-client",
     "codex-api",
+    "copilot-bridge",
     "state",
     "terminal-detection",
     "test-binary-support",
@@ -152,6 +153,7 @@ codex-cloud-tasks-mock-client = { path = "cloud-tasks-mock-client" }
 codex-code-mode = { path = "code-mode" }
 codex-config = { path = "config" }
 codex-connectors = { path = "connectors" }
+codex-copilot-bridge = { path = "copilot-bridge" }
 codex-core = { path = "core" }
 codex-core-api = { path = "core-api" }
 codex-core-plugins = { path = "core-plugins" }

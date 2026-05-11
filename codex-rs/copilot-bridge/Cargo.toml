@@ -29,3 +29,7 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 [[example]]
 name = "hello"
 path = "examples/hello.rs"
+
+[[example]]
+name = "responses_hello"
+path = "examples/responses_hello.rs"

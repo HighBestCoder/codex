@@ -15,38 +15,80 @@ pub enum ChatRole {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ChatMessage {
     pub role: ChatRole,
-    pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub tool_calls: Vec<ChatToolCall>,
 }
 
 impl ChatMessage {
     pub fn system(content: impl Into<String>) -> Self {
         Self {
             role: ChatRole::System,
-            content: content.into(),
+            content: Some(content.into()),
             name: None,
             tool_call_id: None,
+            tool_calls: Vec::new(),
         }
     }
     pub fn user(content: impl Into<String>) -> Self {
         Self {
             role: ChatRole::User,
-            content: content.into(),
+            content: Some(content.into()),
             name: None,
             tool_call_id: None,
+            tool_calls: Vec::new(),
         }
     }
     pub fn assistant(content: impl Into<String>) -> Self {
         Self {
             role: ChatRole::Assistant,
-            content: content.into(),
+            content: Some(content.into()),
             name: None,
             tool_call_id: None,
+            tool_calls: Vec::new(),
         }
     }
+    pub fn assistant_tool_calls(calls: Vec<ChatToolCall>) -> Self {
+        Self {
+            role: ChatRole::Assistant,
+            content: None,
+            name: None,
+            tool_call_id: None,
+            tool_calls: calls,
+        }
+    }
+    pub fn tool_result(call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: ChatRole::Tool,
+            content: Some(content.into()),
+            name: None,
+            tool_call_id: Some(call_id.into()),
+            tool_calls: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ChatToolCall {
+    pub id: String,
+    #[serde(rename = "type", default = "default_tool_call_type")]
+    pub kind: String,
+    pub function: ChatToolCallFunction,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ChatToolCallFunction {
+    pub name: String,
+    pub arguments: String,
+}
+
+fn default_tool_call_type() -> String {
+    "function".to_string()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -61,6 +103,12 @@ pub struct ChatRequest {
     pub top_p: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub stream: Option<bool>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub tools: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub tool_choice: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub parallel_tool_calls: Option<bool>,
 }
 
 impl ChatRequest {
@@ -72,6 +120,9 @@ impl ChatRequest {
             temperature: None,
             top_p: None,
             stream: Some(false),
+            tools: Vec::new(),
+            tool_choice: None,
+            parallel_tool_calls: None,
         }
     }
 }
@@ -98,6 +149,8 @@ pub struct ChatChoiceMessage {
     pub role: ChatRole,
     #[serde(default)]
     pub content: Option<String>,
+    #[serde(default)]
+    pub tool_calls: Vec<ChatToolCall>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -176,6 +229,35 @@ mod tests {
         assert_eq!(messages[1]["content"], "hi");
         assert!(json.get("max_tokens").is_none());
         assert_eq!(json["stream"], false);
+        assert!(json.get("tools").is_none(), "empty tools must be omitted");
+    }
+
+    #[test]
+    fn chat_request_with_tool_calls_round_trips() {
+        let tool_call = ChatToolCall {
+            id: "call_1".into(),
+            kind: "function".into(),
+            function: ChatToolCallFunction {
+                name: "lookup".into(),
+                arguments: r#"{"q":"hello"}"#.into(),
+            },
+        };
+        let req = ChatRequest::new(
+            "gpt-4o",
+            vec![
+                ChatMessage::user("call lookup please"),
+                ChatMessage::assistant_tool_calls(vec![tool_call.clone()]),
+                ChatMessage::tool_result("call_1", "{\"answer\":\"hi\"}"),
+            ],
+        );
+        let json = serde_json::to_value(&req).expect("serialize");
+        let messages = json["messages"].as_array().expect("messages array");
+        assert_eq!(messages[1]["role"], "assistant");
+        assert!(messages[1].get("content").is_none(), "assistant tool-call message has no content");
+        assert_eq!(messages[1]["tool_calls"][0]["id"], "call_1");
+        assert_eq!(messages[1]["tool_calls"][0]["function"]["name"], "lookup");
+        assert_eq!(messages[2]["role"], "tool");
+        assert_eq!(messages[2]["tool_call_id"], "call_1");
     }
 
     #[test]

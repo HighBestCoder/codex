@@ -6,7 +6,7 @@ mod why;
 
 pub use map::{MapError, MapRequest, MapResponse, run_map};
 pub use pgs_path::pgs_path_for;
-pub use plan::{PlanError, PlanRequest, PlanResponse, SymbolPoint, run_plan};
+pub use plan::{PlanError, PlanRequest, PlanResponse, SymbolPoint, UnresolvedCallee, run_plan};
 pub use server::{CallGraphMcpServer, run_server, run_stdio_server};
 pub use why::{EdgeRef, WhyError, WhyMatch, WhyRequest, WhyResponse, run_why};
 
@@ -182,6 +182,59 @@ mod e2e_tests {
         match result {
             Err(PlanError::NoSeeds) => {}
             other => panic!("expected NoSeeds, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_plan_surfaces_unresolved_callee_names_with_locations() {
+        let dir = tempfile::tempdir().expect("dir");
+        let lib_path = dir.path().join("src/lib.rs");
+        fs::create_dir_all(lib_path.parent().expect("parent")).expect("mkdir");
+        fs::write(
+            &lib_path,
+            "pub fn caller() {\n    external_helper(1);\n    another_external(2, 3);\n}\n",
+        )
+        .expect("write");
+        let project_root = dir
+            .path()
+            .canonicalize()
+            .expect("canon")
+            .display()
+            .to_string();
+        run_map(&MapRequest {
+            project_root: project_root.clone(),
+        })
+        .expect("map");
+
+        let resp = run_plan(&PlanRequest {
+            project_root,
+            seed_symbols: vec!["caller".into()],
+            max_path_depth: Some(3),
+            max_subgraph_size: Some(20),
+        })
+        .expect("plan");
+
+        let unresolved: Vec<&str> = resp
+            .unresolved_callees
+            .iter()
+            .map(|u| u.callee_name.as_str())
+            .collect();
+        assert!(
+            unresolved.contains(&"external_helper"),
+            "expected 'external_helper' in unresolved_callees, got {unresolved:?}"
+        );
+        assert!(
+            unresolved.contains(&"another_external"),
+            "expected 'another_external' in unresolved_callees, got {unresolved:?}"
+        );
+        assert!(!resp.unresolved_callees_truncated);
+        for entry in &resp.unresolved_callees {
+            assert_eq!(entry.caller_symbol, "caller");
+            assert!(
+                entry.call_line >= 1,
+                "call_line must be >= 1, got {}",
+                entry.call_line
+            );
         }
     }
 }

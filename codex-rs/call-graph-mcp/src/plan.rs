@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use codex_call_graph_algo::{steiner_subgraph, topo_sort, GraphAlgoError, LoadedGraph};
-use codex_call_graph_store::{FnNode, GraphStore, NodeId};
+use codex_call_graph_store::{FnNode, GraphStore, NodeId, ResolvedTarget};
 use serde::{Deserialize, Serialize};
 
 use crate::pgs_path::pgs_path_for;
@@ -39,6 +39,8 @@ pub struct PlanResponse {
     pub subgraph: Vec<SymbolPoint>,
     pub topo_order: Vec<SymbolPoint>,
     pub cycle_detected: bool,
+    pub unresolved_callees: Vec<UnresolvedCallee>,
+    pub unresolved_callees_truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -46,6 +48,14 @@ pub struct SymbolPoint {
     pub symbol: String,
     pub file: String,
     pub line: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct UnresolvedCallee {
+    pub caller_symbol: String,
+    pub caller_file: String,
+    pub callee_name: String,
+    pub call_line: u32,
 }
 
 pub fn run_plan(req: &PlanRequest) -> Result<PlanResponse, PlanError> {
@@ -84,6 +94,8 @@ pub fn run_plan(req: &PlanRequest) -> Result<PlanResponse, PlanError> {
             subgraph: Vec::new(),
             topo_order: Vec::new(),
             cycle_detected: false,
+            unresolved_callees: Vec::new(),
+            unresolved_callees_truncated: false,
         });
     }
 
@@ -117,12 +129,48 @@ pub fn run_plan(req: &PlanRequest) -> Result<PlanResponse, PlanError> {
         Err(other) => return Err(PlanError::Algo(other)),
     };
 
+    const MAX_UNRESOLVED: usize = 50;
+    let mut unresolved_callees: Vec<UnresolvedCallee> = Vec::new();
+    let mut unresolved_seen: HashSet<(NodeId, String, u32)> = HashSet::new();
+    let mut unresolved_truncated = false;
+    'outer: for &caller_id in &covered {
+        let Some(caller_node) = store.node(caller_id)? else {
+            continue;
+        };
+        for edge in store.out_edges(caller_id)? {
+            let ResolvedTarget::Simple { callee_name } = &edge.target else {
+                continue;
+            };
+            if store.nodes_by_name(callee_name)?.is_empty()
+                && unresolved_seen.insert((caller_id, callee_name.clone(), edge.line))
+            {
+                if unresolved_callees.len() >= MAX_UNRESOLVED {
+                    unresolved_truncated = true;
+                    break 'outer;
+                }
+                unresolved_callees.push(UnresolvedCallee {
+                    caller_symbol: caller_node.simple_name.clone(),
+                    caller_file: caller_node.file.display().to_string(),
+                    callee_name: callee_name.clone(),
+                    call_line: edge.line,
+                });
+            }
+        }
+    }
+    unresolved_callees.sort_by(|a, b| {
+        a.caller_file
+            .cmp(&b.caller_file)
+            .then_with(|| a.call_line.cmp(&b.call_line))
+    });
+
     Ok(PlanResponse {
         seeds_resolved,
         seeds_unresolved,
         subgraph: subgraph_points,
         topo_order,
         cycle_detected,
+        unresolved_callees,
+        unresolved_callees_truncated: unresolved_truncated,
     })
 }
 

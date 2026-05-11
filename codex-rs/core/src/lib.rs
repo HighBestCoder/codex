@@ -10,6 +10,7 @@ mod apps;
 mod arc_monitor;
 mod client;
 mod client_common;
+mod call_graph_decorator;
 mod transport;
 mod realtime_context;
 mod realtime_conversation;

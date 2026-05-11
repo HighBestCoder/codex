@@ -714,7 +714,9 @@ impl ModelClient {
         summary: ReasoningSummaryConfig,
         service_tier: Option<String>,
     ) -> Result<ResponsesApiRequest> {
-        let instructions = &prompt.base_instructions.text;
+        let base_instructions = &prompt.base_instructions.text;
+        let instructions =
+            crate::call_graph_decorator::decorate_instructions(base_instructions, prompt);
         let input = prompt.get_formatted_input();
         let tools = create_tools_json_for_responses_api(&prompt.tools)?;
         let reasoning = Self::build_reasoning(model_info, effort, summary);
@@ -744,7 +746,7 @@ impl ModelClient {
             service_tier.filter(|service_tier| model_info.supports_service_tier(service_tier));
         let request = ResponsesApiRequest {
             model: model_info.slug.clone(),
-            instructions: instructions.clone(),
+            instructions,
             input,
             tools,
             tool_choice: "auto".to_string(),

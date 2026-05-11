@@ -183,6 +183,26 @@ impl ChatWidget {
                 const INIT_PROMPT: &str = include_str!("../../prompt_for_init_command.md");
                 self.submit_user_message(INIT_PROMPT.to_string().into());
             }
+            SlashCommand::GraphMap => {
+                let cwd = self.config.cwd.display().to_string();
+                let prompt = format!(
+                    "Call the graph_map tool with project_root=\"{cwd}\". Once it returns, summarize project_kind, files_indexed, nodes_added, and edges_added."
+                );
+                self.submit_user_message(prompt.into());
+            }
+            SlashCommand::GraphWhy | SlashCommand::GraphPlan | SlashCommand::GraphTrace => {
+                let name = cmd.command();
+                let example = match cmd {
+                    SlashCommand::GraphWhy => "<symbol>",
+                    SlashCommand::GraphPlan => "<sym1> [sym2 ...]",
+                    SlashCommand::GraphTrace => "<program> [args...]",
+                    _ => unreachable!(),
+                };
+                self.add_info_message(
+                    format!("'/{name}' needs arguments."),
+                    Some(format!("Usage: /{name} {example}")),
+                );
+            }
             SlashCommand::Compact => {
                 self.clear_token_usage();
                 if !self.bottom_pane.is_task_running() {
@@ -769,6 +789,29 @@ impl ChatWidget {
                 self.app_event_tx
                     .send(AppEvent::BeginWindowsSandboxGrantReadRoot { path: args });
             }
+            SlashCommand::GraphWhy => {
+                let cwd = self.config.cwd.display().to_string();
+                let prompt = format!(
+                    "Call the graph_why tool with project_root=\"{cwd}\" and symbol=\"{trimmed}\". Report each match's file/line and list callers + callees."
+                );
+                self.submit_user_message(prompt.into());
+            }
+            SlashCommand::GraphPlan => {
+                let cwd = self.config.cwd.display().to_string();
+                let seeds_json = format_string_array(trimmed.split_whitespace());
+                let prompt = format!(
+                    "Call the graph_plan tool with project_root=\"{cwd}\" and seed_symbols={seeds_json}. Report seeds_resolved, subgraph size, the first 10 entries of topo_order, cycle_detected, and the first 5 unresolved_callees."
+                );
+                self.submit_user_message(prompt.into());
+            }
+            SlashCommand::GraphTrace => {
+                let cwd = self.config.cwd.display().to_string();
+                let cmd_json = format_string_array(trimmed.split_whitespace());
+                let prompt = format!(
+                    "Call the graph_trace tool with project_root=\"{cwd}\" and test_command={cmd_json}. Report event_count, unique_edges, edges_written, and test_exit_code."
+                );
+                self.submit_user_message(prompt.into());
+            }
             _ => self.dispatch_command(cmd),
         }
         if source == SlashCommandDispatchSource::Live && cmd != SlashCommand::Goal {
@@ -940,6 +983,10 @@ impl ChatWidget {
             | SlashCommand::Plan
             | SlashCommand::Goal
             | SlashCommand::Collab
+            | SlashCommand::GraphMap
+            | SlashCommand::GraphWhy
+            | SlashCommand::GraphPlan
+            | SlashCommand::GraphTrace
             | SlashCommand::Side
             | SlashCommand::Keymap
             | SlashCommand::Agent
@@ -1008,4 +1055,12 @@ impl ChatWidget {
         self.bottom_pane.drain_pending_submission_state();
         false
     }
+}
+
+fn format_string_array<'a, I: IntoIterator<Item = &'a str>>(items: I) -> String {
+    let escaped: Vec<String> = items
+        .into_iter()
+        .map(|s| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")))
+        .collect();
+    format!("[{}]", escaped.join(", "))
 }

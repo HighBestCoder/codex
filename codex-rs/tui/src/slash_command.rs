@@ -37,6 +37,14 @@ pub enum SlashCommand {
     Plan,
     Goal,
     Collab,
+    #[strum(serialize = "graph-map")]
+    GraphMap,
+    #[strum(serialize = "graph-why")]
+    GraphWhy,
+    #[strum(serialize = "graph-plan")]
+    GraphPlan,
+    #[strum(serialize = "graph-trace")]
+    GraphTrace,
     Agent,
     Side,
     Copy,
@@ -112,6 +120,18 @@ impl SlashCommand {
             SlashCommand::Plan => "switch to Plan mode",
             SlashCommand::Goal => "set or view the goal for a long-running task",
             SlashCommand::Collab => "change collaboration mode (experimental)",
+            SlashCommand::GraphMap => {
+                "index the current project into the call graph (no args)"
+            }
+            SlashCommand::GraphWhy => {
+                "list callers + callees of a symbol: /graph-why <symbol>"
+            }
+            SlashCommand::GraphPlan => {
+                "Steiner subgraph + topo + unresolved-callees for seeds: /graph-plan <sym1> [sym2 ...]"
+            }
+            SlashCommand::GraphTrace => {
+                "run a test under LD_PRELOAD and capture dynamic edges: /graph-trace <program> [args...]"
+            }
             SlashCommand::Agent | SlashCommand::MultiAgents => "switch the active agent thread",
             SlashCommand::Side => "start a side conversation in an ephemeral fork",
             SlashCommand::Permissions => "choose what Codex is allowed to do",
@@ -154,6 +174,9 @@ impl SlashCommand {
                 | SlashCommand::Side
                 | SlashCommand::Resume
                 | SlashCommand::SandboxReadRoot
+                | SlashCommand::GraphWhy
+                | SlashCommand::GraphPlan
+                | SlashCommand::GraphTrace
         )
     }
 
@@ -222,6 +245,10 @@ impl SlashCommand {
             SlashCommand::Settings => true,
             SlashCommand::Collab => true,
             SlashCommand::Agent | SlashCommand::MultiAgents => true,
+            SlashCommand::GraphMap
+            | SlashCommand::GraphWhy
+            | SlashCommand::GraphPlan
+            | SlashCommand::GraphTrace => false,
             SlashCommand::Theme => false,
         }
     }

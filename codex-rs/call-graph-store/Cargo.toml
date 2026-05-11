@@ -1,0 +1,24 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "codex-call-graph-store"
+version.workspace = true
+
+[lib]
+name = "codex_call_graph_store"
+path = "src/lib.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+blake3 = "1"
+postcard = { version = "1", features = ["alloc"] }
+serde = { workspace = true, features = ["derive"] }
+sled = "0.34"
+thiserror = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }

@@ -107,7 +107,6 @@ members = [
     "call-graph-perception",
     "call-graph-algo",
     "call-graph-tools",
-    "call-graph-mcp",
     "state",
     "terminal-detection",
     "test-binary-support",
@@ -165,7 +164,6 @@ codex-call-graph-store = { path = "call-graph-store" }
 codex-call-graph-perception = { path = "call-graph-perception" }
 codex-call-graph-algo = { path = "call-graph-algo" }
 codex-call-graph-tools = { path = "call-graph-tools" }
-codex-call-graph-mcp = { path = "call-graph-mcp" }
 codex-core = { path = "core" }
 codex-core-api = { path = "core-api" }
 codex-core-plugins = { path = "core-plugins" }

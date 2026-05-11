@@ -2244,22 +2244,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "codex-call-graph-mcp"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "codex-call-graph-tools",
- "pretty_assertions",
- "rmcp",
- "schemars 0.8.22",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "codex-call-graph-perception"
 version = "0.0.0"
 dependencies = [

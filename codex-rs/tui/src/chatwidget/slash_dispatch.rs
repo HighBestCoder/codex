@@ -185,10 +185,27 @@ impl ChatWidget {
             }
             SlashCommand::GraphMap => {
                 let cwd = self.config.cwd.display().to_string();
-                let prompt = format!(
-                    "Call the graph_map tool with project_root=\"{cwd}\". Once it returns, summarize project_kind, files_indexed, nodes_added, and edges_added."
-                );
-                self.submit_user_message(prompt.into());
+                let req = codex_call_graph_tools::MapRequest {
+                    project_root: cwd,
+                };
+                match codex_call_graph_tools::run_map(&req) {
+                    Ok(resp) => {
+                        let summary = format!(
+                            "graph_map: kind={} files={}/{} nodes+={} edges+={} scip={} ({} ms)",
+                            resp.project_kind,
+                            resp.files_indexed,
+                            resp.files_seen,
+                            resp.nodes_added,
+                            resp.edges_added,
+                            if resp.scip_used { "yes" } else { "no" },
+                            resp.elapsed_ms,
+                        );
+                        self.add_info_message(summary, resp.scip_skipped_reason);
+                    }
+                    Err(err) => {
+                        self.add_error_message(format!("/graph-map failed: {err}"));
+                    }
+                }
             }
             SlashCommand::GraphWhy | SlashCommand::GraphPlan | SlashCommand::GraphTrace => {
                 let name = cmd.command();
@@ -791,26 +808,100 @@ impl ChatWidget {
             }
             SlashCommand::GraphWhy => {
                 let cwd = self.config.cwd.display().to_string();
-                let prompt = format!(
-                    "Call the graph_why tool with project_root=\"{cwd}\" and symbol=\"{trimmed}\". Report each match's file/line and list callers + callees."
-                );
-                self.submit_user_message(prompt.into());
+                let req = codex_call_graph_tools::WhyRequest {
+                    project_root: cwd,
+                    symbol: trimmed.to_string(),
+                    max_callers: None,
+                    max_callees: None,
+                };
+                match codex_call_graph_tools::run_why(&req) {
+                    Ok(resp) => {
+                        if resp.matches.is_empty() {
+                            self.add_info_message(
+                                format!("graph_why: no definition matched '{trimmed}'"),
+                                Some("Try graph_map first if you have not yet indexed this project.".to_string()),
+                            );
+                        } else {
+                            let lines: Vec<String> = resp
+                                .matches
+                                .iter()
+                                .flat_map(|m| {
+                                    let header = format!(
+                                        "{} @ {}:{} (callers={}, callees={})",
+                                        m.symbol,
+                                        m.file,
+                                        m.line,
+                                        m.callers.len(),
+                                        m.callees.len(),
+                                    );
+                                    std::iter::once(header)
+                                })
+                                .collect();
+                            self.add_info_message(lines.join("\n"), None);
+                        }
+                    }
+                    Err(err) => {
+                        self.add_error_message(format!("/graph-why failed: {err}"));
+                    }
+                }
             }
             SlashCommand::GraphPlan => {
                 let cwd = self.config.cwd.display().to_string();
-                let seeds_json = format_string_array(trimmed.split_whitespace());
-                let prompt = format!(
-                    "Call the graph_plan tool with project_root=\"{cwd}\" and seed_symbols={seeds_json}. Report seeds_resolved, subgraph size, the first 10 entries of topo_order, cycle_detected, and the first 5 unresolved_callees."
-                );
-                self.submit_user_message(prompt.into());
+                let seeds: Vec<String> = trimmed
+                    .split_whitespace()
+                    .map(|s| s.to_string())
+                    .collect();
+                let req = codex_call_graph_tools::PlanRequest {
+                    project_root: cwd,
+                    seed_symbols: seeds,
+                    max_path_depth: None,
+                    max_subgraph_size: None,
+                };
+                match codex_call_graph_tools::run_plan(&req) {
+                    Ok(resp) => {
+                        let summary = format!(
+                            "graph_plan: resolved={} unresolved={} subgraph={} topo={} cycle={} unresolved_callees={}",
+                            resp.seeds_resolved.len(),
+                            resp.seeds_unresolved.len(),
+                            resp.subgraph.len(),
+                            resp.topo_order.len(),
+                            resp.cycle_detected,
+                            resp.unresolved_callees.len(),
+                        );
+                        self.add_info_message(summary, None);
+                    }
+                    Err(err) => {
+                        self.add_error_message(format!("/graph-plan failed: {err}"));
+                    }
+                }
             }
             SlashCommand::GraphTrace => {
                 let cwd = self.config.cwd.display().to_string();
-                let cmd_json = format_string_array(trimmed.split_whitespace());
-                let prompt = format!(
-                    "Call the graph_trace tool with project_root=\"{cwd}\" and test_command={cmd_json}. Report event_count, unique_edges, edges_written, and test_exit_code."
-                );
-                self.submit_user_message(prompt.into());
+                let command: Vec<String> = trimmed
+                    .split_whitespace()
+                    .map(|s| s.to_string())
+                    .collect();
+                let req = codex_call_graph_tools::TraceRequest {
+                    project_root: cwd,
+                    test_command: command,
+                };
+                match codex_call_graph_tools::run_trace(&req) {
+                    Ok(resp) => {
+                        let summary = format!(
+                            "graph_trace: events={} unique_edges={} written={} exit={} rebuilt={} ({} ms)",
+                            resp.event_count,
+                            resp.unique_edges,
+                            resp.edges_written,
+                            resp.test_exit_code,
+                            resp.rebuilt_in_worktree,
+                            resp.elapsed_ms,
+                        );
+                        self.add_info_message(summary, None);
+                    }
+                    Err(err) => {
+                        self.add_error_message(format!("/graph-trace failed: {err}"));
+                    }
+                }
             }
             _ => self.dispatch_command(cmd),
         }
@@ -1055,12 +1146,4 @@ impl ChatWidget {
         self.bottom_pane.drain_pending_submission_state();
         false
     }
-}
-
-fn format_string_array<'a, I: IntoIterator<Item = &'a str>>(items: I) -> String {
-    let escaped: Vec<String> = items
-        .into_iter()
-        .map(|s| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")))
-        .collect();
-    format!("[{}]", escaped.join(", "))
 }

@@ -1,65 +1,107 @@
-# Codex Call-Graph Tools
+# Codex Call-Graph and Embedded Copilot Architecture
 
-Build a project-local call graph, expose it to the model as **native
-in-process tools**, and drive Codex through GitHub Copilot with a fully
-embedded chat<->responses bridge (no separate proxy process).
+This tree extends Codex with two tightly integrated capabilities:
+
+1. **Embedded GitHub Copilot transport** inside the `codex` process
+2. **Native in-process call-graph tools** and matching slash commands
+
+The result is a single-binary workflow:
+
+- no external Copilot proxy daemon;
+- no call-graph MCP server;
+- no extra localhost bridge process.
+
+Everything in this document describes the **current integrated architecture**, not the earlier prototype path.
 
 ## Why this exists
 
-Codex's default model providers only speak the OpenAI Responses API.
-GitHub Copilot speaks chat/completions. This tree ships:
+Codex internally speaks the OpenAI Responses protocol. GitHub Copilot exposes chat/completions. This branch bridges that gap by implementing a custom `HttpTransport` that lives inside Codex itself.
 
-1. A **Copilot bridge** that lives inside `codex` itself as a custom
-   `HttpTransport`. When the active provider is `copilot`, codex
-   short-circuits its reqwest path and routes Responses requests
-   through `CopilotTransport`, which translates them to chat/completions
-   and back. No localhost daemon required.
-2. A **call-graph engine** (store / perception / algo) that can index
-   Rust, C, and C++ projects.
-3. **Four native Codex tools** (`graph_map`, `graph_why`,
-   `graph_plan`, `graph_trace`) registered as in-process
-   `ToolHandler`s next to `ApplyPatchHandler`, plus matching slash
-   commands (`/graph-map` etc.).
+At the same time, the branch adds a project-local call-graph engine and exposes it to Codex as native handlers rather than MCP tools. That lets the model use graph structure directly, while also allowing users to run graph actions manually through slash commands.
 
-Zero MCP child process, zero HTTP proxy daemon; everything runs inside
-the `codex` binary itself.
+## High-level architecture
+
+### Embedded Copilot path
+
+When the configured provider name is `copilot` (or `github-copilot`), Codex does **not** use the normal reqwest transport path directly. Instead, `core/src/transport.rs` builds `CodexTransport::Copilot`, which wraps `codex_copilot_bridge::CopilotTransport`.
+
+That transport:
+
+- loads GitHub OAuth credentials from the local auth file or environment;
+- refreshes the Copilot session token via `https://api.github.com/copilot_internal/v2/token`;
+- translates Responses requests to Copilot chat/completions requests;
+- returns normal Codex response/streaming data back to the rest of the app.
+
+### Native call-graph path
+
+The graph stack is fully in-process:
+
+- `graph_map`
+- `graph_why`
+- `graph_plan`
+- `graph_trace`
+
+These are registered as native `ToolHandler`s in `codex-core`, and also exposed through TUI slash commands:
+
+- `/graph-map`
+- `/graph-why <symbol>`
+- `/graph-plan <sym1> [sym2 ...]`
+- `/graph-trace <program> [args ...]`
+
+Slash commands execute the handler directly and write the result into conversation history without spending an extra model turn.
+
+### Automatic graph-aware prompt decoration
+
+After a project has been indexed, `core/src/call_graph_decorator.rs` inspects the latest user message, extracts likely identifiers, looks them up in the local graph store, and injects a compact graph summary into the model instructions.
+
+If no graph exists yet for the current project, Codex appends a hint telling the user to run `/graph-map` first.
 
 ## Crates in this tree
 
 | Crate | Role |
 |---|---|
-| `codex-copilot-bridge` | OAuth + session-token refresh, chat-completions client, Responses<->chat translation, **`CopilotTransport` (`impl HttpTransport`)**. No `codex-*` deps. |
-| `codex-call-graph-store` | sled-backed embedded graph DB. Schema is byte-for-byte compatible with claw-pgs. |
-| `codex-call-graph-perception` | Source parsers: syn (Rust), tree-sitter (C/C++), SCIP (rust-analyzer / scip-clang), dynamic finstrument runtime + event reconstruction, git history. |
-| `codex-call-graph-algo` | petgraph-backed algorithms: SCC, topo sort, PageRank, BFS, Steiner subgraph, bounded loader, `CallerIndexCache`. |
-| `codex-call-graph-tools` | Pure `run_map` / `run_why` / `run_plan` / `run_trace` entry points + request/response types. |
-| `codex-core` (extended) | Hosts the four `Graph*Handler` impls plus the `CodexTransport` enum (`Reqwest \| Copilot`) and the `build_transport_for_provider` factory. |
+| `codex-copilot-bridge` | Copilot auth loading, device-flow support, session-token refresh, chat-completions client, Responses↔chat translation, and `CopilotTransport` (`impl HttpTransport`). |
+| `codex-call-graph-store` | sled-backed embedded graph store. |
+| `codex-call-graph-perception` | Rust/C/C++ parsing, SCIP enrichment, dynamic instrumentation support, git/worktree helpers. |
+| `codex-call-graph-algo` | Graph algorithms, bounded loading, and `CallerIndexCache`. |
+| `codex-call-graph-tools` | `run_map`, `run_why`, `run_plan`, `run_trace`, request/response types, and PGS path handling. |
+| `codex-core` | Transport selection, graph-aware prompt decoration, native graph tool handlers, and registration logic. |
 
-## One-time setup
+## Build and install
 
-### 1. Build
+Build the single Codex binary from the Rust workspace:
 
 ```bash
 cd codex-rs
-cargo build -p codex-cli --bin codex
+cargo build -p codex-cli --bin codex --release
 ```
 
-That's the only binary. No proxy server.
-
-### 2. Put the binary on PATH
+Optionally place the binary on `PATH`:
 
 ```bash
-sudo ln -sf $(pwd)/target/release/codex /usr/local/bin/codex
+sudo ln -sf "$(pwd)/target/release/codex" /usr/local/bin/codex
 ```
 
-### 3. Provide Copilot credentials
+## Copilot credentials and login
 
-Drop the OAuth JSON at any of these locations (first match wins):
+The preferred flow is now built into the CLI:
 
-- `$CODEX_COPILOT_AUTH_FILE`
-- `$CLAW_COPILOT_AUTH_FILE`
-- `~/.config/codex/copilot_auth.json`
-- `~/.config/claw/copilot_auth.json`
+```bash
+codex copilot login
+codex copilot status
+codex copilot logout
+```
+
+`codex copilot login` starts the GitHub device-code flow, stores the OAuth token locally, and lets the embedded transport refresh the session token on first use.
+
+Credential resolution order:
+
+1. `$CODEX_COPILOT_AUTH_FILE`
+2. `$CLAW_COPILOT_AUTH_FILE`
+3. `~/.config/codex/copilot_auth.json`
+4. `~/.config/claw/copilot_auth.json`
+
+Minimal stored auth shape:
 
 ```json
 {
@@ -70,158 +112,186 @@ Drop the OAuth JSON at any of these locations (first match wins):
 }
 ```
 
-The bridge auto-refreshes the session token against
-`https://api.github.com/copilot_internal/v2/token` when needed.
+The session token and endpoint are optional on first login; the bridge fills them in when it refreshes the token.
 
-### 4. `~/.codex/config.toml`
+## Recommended `~/.codex/config.toml`
+
+Use a provider named `copilot`, and disable namespacing if you want the model to call `graph_*` directly by name:
 
 ```toml
 model = "claude-opus-4.7-1m-internal"
 model_provider = "copilot"
+model_context_window = 1000000
+model_auto_compact_token_limit = 900000
 approval_policy = "never"
 sandbox_mode = "danger-full-access"
+namespace_tools = false
 
 [model_providers.copilot]
 name = "copilot"
 base_url = "https://api.enterprise.githubcopilot.com"
 wire_api = "responses"
-namespace_tools = false
 requires_openai_auth = false
-env_key = "COPILOT_PROXY_DUMMY_KEY"
 
-[projects."/path/to/your/project"]
+[projects."/absolute/path/to/your/project"]
 trust_level = "trusted"
 ```
 
-Key configuration choices, all defaults:
+Important clarifications:
 
-- `name = "copilot"` -- triggers the embedded `CopilotTransport`.
-- `approval_policy = "never"` + `sandbox_mode = "danger-full-access"`
-  -- so the model can run tools and shell without prompting.
-- `namespace_tools = false` -- exposes `graph_*` to the model directly
-  rather than behind `tool_search` namespacing.
-- No `[mcp_servers.*]` section needed; the graph tools are native
-  handlers.
-- No proxy / no localhost daemon -- `base_url` points at the real
-  Copilot endpoint but the embedded transport intercepts requests
-  before they leave the process.
+- `name = "copilot"` is what triggers the embedded transport path.
+- `namespace_tools = false` is a **recommended user setting** when you want the model to call `graph_map`, `graph_why`, and friends by their direct names.
+- Internally, the tools configuration still defaults `call_graph_tools` to enabled.
+- No `[mcp_servers.*]` section is required for the graph workflow.
+- No dummy proxy environment variable is required.
 
 ## Daily use
 
-Two ways to drive the tools.
+### Interactive TUI workflow
 
-**(a) Free-form prompt** (let the model decide):
+Start Codex in your project:
+
 ```bash
-COPILOT_PROXY_DUMMY_KEY=anything codex exec --skip-git-repo-check \
-  --cd /path/to/your/project \
-  "Use graph_map then graph_why to find every caller of foo()."
+codex --cd /absolute/path/to/your/project
 ```
 
-`--dangerously-bypass-approvals-and-sandbox` is unnecessary now that
-the config sets `approval_policy = "never"` + `sandbox_mode =
-"danger-full-access"`.
+Then run:
 
-**(b) Slash commands** (in `codex` interactive TUI):
-```
+```text
 /graph-map
 /graph-why ValidateCollectionName
 /graph-plan ValidateCollectionName Create Get
 /graph-trace ./build/my_tests
 ```
-Slash commands execute the in-process handler directly and print the
-result into conversation history -- no LLM round trip.
 
-**(c) Direct exec command** (no TUI):
+### Exec workflow
+
+Slash commands also work in exec mode:
+
 ```bash
-codex exec --cd /path/to/your/project \
-  "/graph-map"  # works because slash commands also fire in exec mode
+codex exec --cd /absolute/path/to/your/project "/graph-map"
+codex exec --cd /absolute/path/to/your/project "/graph-why ValidateCollectionName"
 ```
 
-## The four native tools
+You can also rely on normal prompts and let the model decide whether to use graph tools:
+
+```bash
+codex exec --cd /absolute/path/to/your/project \
+  "Use graph_map and graph_why to find every caller of ValidateCollectionName."
+```
+
+Because approvals and sandboxing are configurable through `config.toml`, you no longer need proxy-era shell wrappers or bypass flags just to make the integrated workflow usable.
+
+## Native tool semantics
 
 ### `graph_map`
 
-| Field | Notes |
-|---|---|
-| Input  | `{ project_root: absolute path }` |
-| Detect | Cargo.toml / compile_commands.json / CMakeLists.txt / extension scan → ProjectKind |
-| Parse  | Rust syn fast path, tree-sitter for C/C++, Mixed walks each part, Unknown tries Rust then C++ |
-| Output | `project_kind`, `files_seen`, `files_indexed`, `failures`, `nodes_added`, `edges_added`, `elapsed_ms`, `pgs_path` |
+**Input**
 
-The PGS lands at `$CODEX_HOME/call-graph/<8-byte blake3 hash of the
-canonical project_root>/`.
+```json
+{ "project_root": "/absolute/path/to/project" }
+```
+
+**Behavior**
+
+- detects Rust, CMake/C++, mixed, or unknown projects;
+- picks the fast parser path for the detected kind;
+- automatically attempts SCIP enrichment when `rust-analyzer` or `scip-clang` is available on `PATH`;
+- writes results into a persistent local PGS directory;
+- invalidates the caller index cache after writing.
+
+**Output highlights**
+
+- `project_kind`
+- `files_seen`
+- `files_indexed`
+- `failures`
+- `nodes_added`
+- `edges_added`
+- `scip_used`
+- `scip_skipped_reason`
+- `elapsed_ms`
+- `pgs_path`
+
+There is no separate `--refresh` mode to remember; re-running `graph_map` already performs the current indexing flow.
 
 ### `graph_why`
 
-| Field | Notes |
-|---|---|
-| Input  | `{ project_root, symbol, max_callers?, max_callees? }` |
-| Output | For each definition that matches the simple name: `file`, `line`, callers + callees with their `source` (`simple_name` / `scip_internal` / `scip_external` / `dynamic`) and `confidence` |
+**Input**
 
-Simple-name caller lookup falls back to scanning `iter_out_edges`,
-which keeps caller lists populated even on tree-sitter-only projects.
+```json
+{ "project_root": "/absolute/path/to/project", "symbol": "ValidateCollectionName" }
+```
+
+**Behavior**
+
+- resolves definitions by simple name;
+- returns callers and callees for each match;
+- includes edge provenance such as simple-name, SCIP, or dynamic trace edges.
 
 ### `graph_plan`
 
-| Field | Notes |
-|---|---|
-| Input  | `{ project_root, seed_symbols: 1..32, max_path_depth?, max_subgraph_size? }` |
-| Output | `seeds_resolved`, `seeds_unresolved`, `subgraph` (sorted by file/line), `topo_order`, `cycle_detected`, `unresolved_callees` (capped at 50) |
+**Input**
 
-Uses `LoadedGraph::from_pgs_bounded` so the algorithm never reads the
-entire call graph; walks `max_path_depth` BFS hops from the seeds.
+```json
+{ "project_root": "/absolute/path/to/project", "seed_symbols": ["ValidateCollectionName", "Create"] }
+```
+
+**Behavior**
+
+- performs bounded loading instead of scanning the whole graph;
+- uses cached caller indexes for large projects;
+- returns a sorted subgraph, topological order, cycle signal, and unresolved callees.
 
 ### `graph_trace`
 
-| Field | Notes |
-|---|---|
-| Input  | `{ project_root, test_command: 1..64 args }` |
-| Output | `runtime_so`, `events_path`, `event_count`, `unique_edges`, `edges_written`, `test_exit_code`, `elapsed_ms` |
+**Input**
 
-Builds `libclaw_finstrument.so` once into
-`$project_root/.codex-call-graph-cache/`, runs the test command under
-`LD_PRELOAD` + `CLAW_TRACE_OUTPUT`, demangles Itanium symbols, then
-upserts the observed edges into the PGS under the synthetic file
-`<dynamic-trace>` with `EdgeSource::Dynamic`.
+```json
+{ "project_root": "/absolute/path/to/project", "test_command": ["./build/my_tests"] }
+```
 
-Caller must build the test binary with `-finstrument-functions` and
-link with `-rdynamic` so `dladdr` resolves symbol names.
+**Behavior**
 
-## Validated workflows
+- requires an existing PGS and asks you to run `graph_map` first if none exists;
+- builds the instrumentation runtime into `.codex-call-graph-cache/`;
+- runs the command under `LD_PRELOAD` and `CLAW_TRACE_OUTPUT`;
+- reconstructs dynamic edges and writes them back into the graph store.
 
-Real measurements on this host:
+For **CMake + git** projects, `graph_trace` also creates a temporary worktree, runs CMake configure/build with `-finstrument-functions` and `-rdynamic`, then executes the test command from that rebuilt tree. There is no separate `--rebuild` flag to pass.
 
-| Scenario | Time | Notes |
-|---|---|---|
-| `/tmp/codex-graph-demo` 2-file Rust map+why | 16 s | Native handlers; was 30-50 s through MCP |
-| `cortex.core` 530-file C++ map+why | 37 s | Tree-sitter index + caller lookup |
-| `cortex.core` graph_plan(single seed) | 83 s | Bounded BFS over ~100k edges |
+## PGS storage path
+
+The local graph store path is derived from the canonical project root:
+
+- base directory: `$CODEX_HOME/call-graph/`
+- fallback base directory when `CODEX_HOME` is unset: `~/.codex/call-graph/`
+- final leaf: the first 8 bytes of the Blake3 hash of the canonical project root, rendered as hex
+
+In code, this is implemented by `call-graph-tools/src/pgs_path.rs`.
 
 ## Source touchpoints inside codex
 
-Stages 6 + 7 touch these files inside the `codex/` workspace:
+The main implementation entry points are:
 
-- `model-provider-info/src/lib.rs` — `namespace_tools` field.
-- `model-provider/src/provider.rs` — `ConfiguredModelProvider::capabilities()` reads it.
-- `core/src/tools/handlers/call_graph_spec.rs` — 4 `ToolSpec` builders.
-- `core/src/tools/handlers/call_graph.rs` — 4 `ToolHandler` impls.
-- `core/src/tools/handlers/mod.rs` — module + re-exports.
-- `core/src/tools/spec_plan.rs` — `if config.call_graph_tools { register all four }`.
-- `core/src/transport.rs` — `CodexTransport` enum + `build_transport_for_provider` factory.
-- `core/src/lib.rs` — `mod transport;`.
-- `core/src/client.rs` — 4 call sites swapped from `ReqwestTransport::new(...)` to `build_transport_for_provider(...)`.
-- `tools/src/tool_config.rs` — `call_graph_tools: bool` (default true) + `with_call_graph_tools` builder.
-- `tui/src/slash_command.rs` — 4 new variants with descriptions / inline-args / available-during-task entries.
-- `tui/src/chatwidget/slash_dispatch.rs` — dispatch arms that execute the in-process handler directly.
+- `core/src/transport.rs` — embedded transport selection via `build_transport_for_provider`
+- `core/src/client.rs` — transport call sites now use `build_transport_for_provider(...)`
+- `core/src/call_graph_decorator.rs` — automatic graph-aware instruction injection
+- `core/src/tools/handlers/call_graph_spec.rs` — tool specs for the four graph tools
+- `core/src/tools/handlers/call_graph.rs` — tool handler implementations
+- `core/src/tools/spec_plan.rs` — graph handler registration when `call_graph_tools` is enabled
+- `tools/src/tool_config.rs` — `call_graph_tools: true` by default
+- `tui/src/slash_command.rs` — `/graph-*` command registration and UX strings
+- `tui/src/chatwidget/slash_dispatch.rs` — direct slash-command dispatch into graph handlers
+- `cli/src/main.rs` — `codex copilot login/logout/status`
 
-## Known limits / follow-ups
+## Known limits
 
-- **`graph_trace` for cargo projects**: today only CMake + git projects
-  get the auto-rebuild-in-worktree path; cargo projects still need the
-  caller to inject the right rustc flags manually.
-- **scip-clang / rust-analyzer refresh policy**: `graph_map` runs SCIP
-  every call when the binary is on PATH. No "stale-cache" check yet, so
-  a re-map after a small change re-spawns scip-clang.
-- **Slash result formatting**: `/graph-plan` and `/graph-trace` print a
-  one-line summary; deep output (e.g. the full subgraph node list) is
-  not yet pretty-printed in the TUI history.
+- **Cargo-specific dynamic trace rebuild path**: the automatic rebuild path currently targets CMake + git projects. Cargo projects still need the right compiler/instrumentation setup outside this helper path.
+- **SCIP rerun policy**: `graph_map` attempts SCIP enrichment whenever the relevant indexer is on `PATH`; it does not yet do stale-cache detection.
+- **Slash output formatting**: `/graph-plan` and `/graph-trace` still favor concise summaries over rich pretty-printing in the chat history.
+
+## Related docs
+
+- Top-level usage guide: [`../README.md`](../README.md)
+- Rust workspace overview: [`README.md`](./README.md)

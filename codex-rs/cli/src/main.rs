@@ -117,6 +117,10 @@ enum Subcommand {
     /// Remove stored authentication credentials.
     Logout(LogoutCommand),
 
+    /// Manage GitHub Copilot credentials for the embedded copilot transport.
+    #[command(subcommand)]
+    Copilot(CopilotSubcommand),
+
     /// Manage external MCP servers for Codex.
     Mcp(McpCli),
 
@@ -195,6 +199,16 @@ struct PluginCli {
 enum PluginSubcommand {
     /// Manage plugin marketplaces for Codex.
     Marketplace(MarketplaceCli),
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum CopilotSubcommand {
+    /// Run a GitHub device-code flow and store the resulting OAuth token.
+    Login,
+    /// Delete the stored Copilot credentials.
+    Logout,
+    /// Print the auth file path and whether the cached session token is still valid.
+    Status,
 }
 
 #[derive(Debug, Parser)]
@@ -1126,6 +1140,14 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
             );
             run_logout(logout_cli.config_overrides).await;
         }
+        Some(Subcommand::Copilot(sub)) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "copilot",
+            )?;
+            run_copilot_subcommand(sub).await?;
+        }
         Some(Subcommand::Completion(completion_cli)) => {
             reject_remote_mode_for_subcommand(
                 root_remote.as_deref(),
@@ -1840,6 +1862,103 @@ fn print_completion(cmd: CompletionCommand) {
     let mut app = MultitoolCli::command();
     let name = "codex";
     generate(cmd.shell, &mut app, name, &mut std::io::stdout());
+}
+
+async fn run_copilot_subcommand(sub: CopilotSubcommand) -> anyhow::Result<()> {
+    match sub {
+        CopilotSubcommand::Login => copilot_login().await,
+        CopilotSubcommand::Logout => copilot_logout(),
+        CopilotSubcommand::Status => copilot_status().await,
+    }
+}
+
+fn copilot_auth_path() -> std::path::PathBuf {
+    if let Ok(p) = std::env::var("CODEX_COPILOT_AUTH_FILE") {
+        return std::path::PathBuf::from(p);
+    }
+    if let Ok(p) = std::env::var("CLAW_COPILOT_AUTH_FILE") {
+        return std::path::PathBuf::from(p);
+    }
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+    home.join(".config").join("codex").join("copilot_auth.json")
+}
+
+async fn copilot_login() -> anyhow::Result<()> {
+    use codex_copilot_bridge::{
+        poll_device_code_for_oauth_token, start_device_code_flow, StoredAuth,
+        COPILOT_DEFAULT_ENDPOINT,
+    };
+
+    let dest = copilot_auth_path();
+    println!("codex copilot login: starting GitHub device-code flow...");
+    let device = start_device_code_flow().await?;
+    println!();
+    println!("  1. Open this URL in any browser:    {}", device.verification_uri);
+    println!("  2. Enter this code:                 {}", device.user_code);
+    println!();
+    println!("Polling for authorization (this expires in {} seconds)...", device.expires_in);
+
+    let oauth_token = poll_device_code_for_oauth_token(
+        &device.device_code,
+        device.interval,
+        std::time::Duration::from_secs(device.expires_in.max(60)),
+    )
+    .await?;
+
+    let stored = StoredAuth {
+        github_oauth_token: oauth_token,
+        session_token: None,
+        expires_at: None,
+        endpoint: Some(COPILOT_DEFAULT_ENDPOINT.to_string()),
+    };
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_string_pretty(&stored)?;
+    std::fs::write(&dest, json)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o600));
+    }
+    println!();
+    println!("Stored OAuth token at {}", dest.display());
+    println!("Session token will be auto-refreshed on first codex run.");
+    Ok(())
+}
+
+fn copilot_logout() -> anyhow::Result<()> {
+    let dest = copilot_auth_path();
+    if dest.exists() {
+        std::fs::remove_file(&dest)?;
+        println!("Removed {}", dest.display());
+    } else {
+        println!("No Copilot credentials at {}", dest.display());
+    }
+    Ok(())
+}
+
+async fn copilot_status() -> anyhow::Result<()> {
+    use codex_copilot_bridge::CopilotAuth;
+    let dest = copilot_auth_path();
+    println!("Default auth path: {}", dest.display());
+    let resolved = CopilotAuth::from_env();
+    match resolved {
+        Ok(auth) => {
+            let endpoint = auth.snapshot_endpoint().await;
+            println!("Status:           credentials loaded");
+            println!("Endpoint:         {endpoint}");
+            println!("Refresh test:");
+            match auth.ensure_session_token().await {
+                Ok((_, _)) => println!("                  session token OK"),
+                Err(err) => println!("                  refresh FAILED: {err}"),
+            }
+        }
+        Err(err) => println!("Status:           NOT logged in ({err})"),
+    }
+    Ok(())
 }
 
 #[cfg(test)]

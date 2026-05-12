@@ -1,6 +1,7 @@
 mod auth;
 mod bridge;
 mod chat;
+mod device_flow;
 mod error;
 mod responses;
 mod transport;
@@ -15,6 +16,10 @@ pub use bridge::{
 pub use chat::{
     ChatChoice, ChatChoiceMessage, ChatMessage, ChatRequest, ChatResponse, ChatRole, ChatToolCall,
     ChatToolCallFunction, ChatUsage, CopilotChatClient,
+};
+pub use device_flow::{
+    poll_device_code_for_oauth_token, start_device_code_flow, DeviceCodeResponse,
+    COPILOT_GITHUB_CLIENT_ID,
 };
 pub use error::{CopilotError, CopilotResult};
 pub use responses::{
